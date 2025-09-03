@@ -887,6 +887,8 @@ func runWorkload(cmd *cobra.Command, args []string) {
 
 	fmt.Printf("Logging metrics to: %s\n", csvOutput)
 
+	batchSize, _ := cmd.Flags().GetInt("momento-client-worker-batch-size")
+
 	// For Momento, create cache once upfront to avoid spam
 	if cacheType == "momento" {
 		apiKey, _ := cmd.Flags().GetString("momento-api-key")
@@ -922,17 +924,17 @@ func runWorkload(cmd *cobra.Command, args []string) {
 	if trafficPatternFile != "" {
 		// Use dynamic traffic pattern
 		runDynamicWorkload(cmd, trafficPatternFile, cacheType, zipfExp, ratioStr, keyPrefix, keyMin,
-			totalKeys, dataSize, randomData, defaultTTL, measureSetup, verbose, quiet, timeoutSeconds, stats)
+			totalKeys, dataSize, randomData, defaultTTL, batchSize, measureSetup, verbose, quiet, timeoutSeconds, stats)
 	} else {
 		// Use static configuration - run the original logic
 		runStaticWorkload(cmd, cacheType, clientCount, rps, zipfExp, ratioStr, keyPrefix, keyMin,
-			totalKeys, dataSize, randomData, defaultTTL, measureSetup, verbose, quiet, timeoutSeconds, testTime, stats)
+			totalKeys, dataSize, randomData, defaultTTL, batchSize, measureSetup, verbose, quiet, timeoutSeconds, testTime, stats)
 	}
 }
 
 // runStaticWorkload runs the original static workload logic
 func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps int, zipfExp float64,
-	ratioStr, keyPrefix string, keyMin, totalKeys, dataSize int, randomData bool, defaultTTL int, measureSetup, verbose, quiet bool,
+	ratioStr, keyPrefix string, keyMin, totalKeys, dataSize int, randomData bool, defaultTTL int, batchSize int, measureSetup, verbose, quiet bool,
 	timeoutSeconds, testTime int, stats *WorkloadStats) {
 
 	// Parse ratio
@@ -981,7 +983,7 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 		wg.Add(1)
 		// Let each worker create its own connection in parallel
 		go runWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
-			generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
+			generator, stats, batchSize, setRatio, getRatio, keyPrefix, keyMin, limiter,
 			timeoutSeconds, measureSetup, verbose, quiet)
 	}
 
@@ -1005,7 +1007,7 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 
 // runDynamicWorkload runs workload with dynamic traffic patterns
 func runDynamicWorkload(cmd *cobra.Command, trafficPatternFile, cacheType string, zipfExp float64,
-	ratioStr, keyPrefix string, keyMin, totalKeys, dataSize int, randomData bool, defaultTTL int, measureSetup, verbose, quiet bool,
+	ratioStr, keyPrefix string, keyMin, totalKeys, dataSize int, randomData bool, defaultTTL int, batchSize int, measureSetup, verbose, quiet bool,
 	timeoutSeconds int, stats *WorkloadStats) {
 
 	// Parse traffic pattern
@@ -1062,7 +1064,7 @@ func runDynamicWorkload(cmd *cobra.Command, trafficPatternFile, cacheType string
 
 	// Start traffic pattern manager
 	go manageTrafficPattern(ctx, trafficConfigs, cacheType, cmd, generator, stats,
-		setRatio, getRatio, keyPrefix, keyMin, totalKeys, zipfExp, measureSetup, verbose, quiet, timeoutSeconds)
+		setRatio, getRatio, keyPrefix, batchSize, keyMin, totalKeys, zipfExp, measureSetup, verbose, quiet, timeoutSeconds)
 
 	// Start progress reporting
 	go reportProgress(ctx, stats, verbose)
@@ -1080,7 +1082,7 @@ func runDynamicWorkload(cmd *cobra.Command, trafficPatternFile, cacheType string
 // runWorkerInternal contains the actual worker logic without WaitGroup management
 func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
-	setRatio, getRatio int, keyPrefix string, keyMin int,
+	setRatio, getRatio int, keyPrefix string, batchSize int, keyMin int,
 	limiter *rate.Limiter, timeoutSeconds int, verbose bool) {
 
 	// Create a worker-specific Zipf generator with unique seed to ensure different key patterns
@@ -1097,6 +1099,9 @@ func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 	}
 
 	var opCount int64
+	if verbose {
+		fmt.Printf("Worker %d: Using batching with batch size %d\n", workerID, batchSize)
+	}
 
 	for {
 		select {
@@ -1113,57 +1118,112 @@ func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 			}
 		}
 
-		// Determine operation type based on ratio
-		opCount++
-		isSet := (opCount % int64(totalRatio)) < int64(setRatio)
+		runBatch(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
+			setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, batchSize, &opCount, zipfGen)
+	}
+}
 
-		// Generate key using Zipf distribution
-		keyOffset := zipfGen.Next()
-		key := fmt.Sprintf("%s%d", keyPrefix, keyMin+int(keyOffset))
+// runBatch processes a batch of requests concurrently
+func runBatch(ctx context.Context, workerID int, client CacheClient,
+	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
+	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, batchSize int,
+	opCount *int64, zipfGen *ZipfGenerator) {
 
-		// Create operation timeout context
-		opCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	var wg sync.WaitGroup
+	results := make(chan batchResult, batchSize)
 
-		if isSet {
-			// Perform SET operation
-			data, err := generator.GenerateData()
-			if err != nil {
-				atomic.AddInt64(&stats.SetErrors, 1)
-				cancel()
-				continue
-			}
+	// Start batchSize goroutines to process requests concurrently
+	for i := 0; i < batchSize; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result := processSingleRequest(ctx, workerID, client, totalKeys, zipfExp, generator,
+				setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, opCount, zipfGen)
+			results <- result
+		}()
+	}
 
-			// Get expiration from generator (uses DefaultTTL if set)
-			expiration := generator.GetExpiration()
+	// Wait for all goroutines to complete
+	wg.Wait()
+	close(results)
 
-			start := time.Now()
-			err = client.Set(opCtx, key, data, expiration)
-			latency := time.Since(start)
-			cancel()
-
-			if err != nil {
+	// Process results and update stats
+	for result := range results {
+		if result.isSet {
+			if result.isError {
 				atomic.AddInt64(&stats.SetErrors, 1)
 				stats.RecordOperationInBlock(true, 0, true)
 			} else {
 				atomic.AddInt64(&stats.SetOps, 1)
-				stats.SetStats.RecordLatency(latency.Microseconds())
-				stats.RecordOperationInBlock(true, latency.Microseconds(), false)
+				stats.SetStats.RecordLatency(result.latencyMicros)
+				stats.RecordOperationInBlock(true, result.latencyMicros, false)
 			}
 		} else {
-			// Perform GET operation
-			start := time.Now()
-			_, err := client.Get(opCtx, key)
-			latency := time.Since(start)
-			cancel()
-
-			if err != nil {
+			if result.isError {
 				atomic.AddInt64(&stats.GetErrors, 1)
 				stats.RecordOperationInBlock(false, 0, true)
 			} else {
 				atomic.AddInt64(&stats.GetOps, 1)
-				stats.GetStats.RecordLatency(latency.Microseconds())
-				stats.RecordOperationInBlock(false, latency.Microseconds(), false)
+				stats.GetStats.RecordLatency(result.latencyMicros)
+				stats.RecordOperationInBlock(false, result.latencyMicros, false)
 			}
+		}
+	}
+}
+
+// batchResult represents the result of a single request operation
+type batchResult struct {
+	isSet         bool
+	isError       bool
+	latencyMicros int64
+}
+
+// processSingleRequest processes a single request and returns the result
+func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
+	totalKeys int, zipfExp float64, generator *DataGenerator,
+	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, opCount *int64, zipfGen *ZipfGenerator) batchResult {
+
+	// Determine operation type based on ratio
+	*opCount++
+	isSet := (*opCount % int64(setRatio+getRatio)) < int64(setRatio)
+
+	// Generate key using Zipf distribution
+	keyOffset := zipfGen.Next()
+	key := fmt.Sprintf("%s%d", keyPrefix, keyMin+int(keyOffset))
+
+	// Create operation timeout context
+	opCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+
+	if isSet {
+		// Perform SET operation
+		data, err := generator.GenerateData()
+		if err != nil {
+			return batchResult{isSet: true, isError: true, latencyMicros: 0}
+		}
+
+		// Get expiration from generator (uses DefaultTTL if set)
+		expiration := generator.GetExpiration()
+
+		start := time.Now()
+		err = client.Set(opCtx, key, data, expiration)
+		latency := time.Since(start)
+
+		if err != nil {
+			return batchResult{isSet: true, isError: true, latencyMicros: 0}
+		} else {
+			return batchResult{isSet: true, isError: false, latencyMicros: latency.Microseconds()}
+		}
+	} else {
+		// Perform GET operation
+		start := time.Now()
+		_, err := client.Get(opCtx, key)
+		latency := time.Since(start)
+
+		if err != nil {
+			return batchResult{isSet: false, isError: true, latencyMicros: 0}
+		} else {
+			return batchResult{isSet: false, isError: false, latencyMicros: latency.Microseconds()}
 		}
 	}
 }
@@ -1171,7 +1231,7 @@ func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 // runWorkerWithConnectionCreation creates its own connection and then runs the worker
 func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, workerID int,
 	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
-	generator *DataGenerator, stats *WorkloadStats, setRatio, getRatio int,
+	generator *DataGenerator, stats *WorkloadStats, batchSize int, setRatio, getRatio int,
 	keyPrefix string, keyMin int, limiter *rate.Limiter, timeoutSeconds int,
 	measureSetup, verbose, quiet bool) {
 
@@ -1199,13 +1259,13 @@ func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, wo
 
 	// Now run the normal worker routine (but don't call wg.Done() again)
 	runWorkerInternal(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
-		setRatio, getRatio, keyPrefix, keyMin, limiter, timeoutSeconds, verbose)
+		setRatio, getRatio, keyPrefix, batchSize, keyMin, limiter, timeoutSeconds, verbose)
 }
 
 // manageTrafficPattern manages dynamic client scaling and QPS changes
 func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheType string,
 	cmd *cobra.Command, generator *DataGenerator, stats *WorkloadStats,
-	setRatio, getRatio int, keyPrefix string, keyMin, totalKeys int, zipfExp float64,
+	setRatio, getRatio int, keyPrefix string, batchSize int, keyMin, totalKeys int, zipfExp float64,
 	measureSetup, verbose, quiet bool, timeoutSeconds int) {
 
 	var activeWorkers []context.CancelFunc
@@ -1278,7 +1338,7 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 				wg.Add(1)
 				// Pass connection creation parameters to worker - let it create connection in parallel
 				go runWorkerWithConnectionCreation(workerCtx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
-					generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
+					generator, stats, batchSize, setRatio, getRatio, keyPrefix, keyMin, limiter,
 					timeoutSeconds, measureSetup, verbose, quiet)
 			}
 
@@ -1957,6 +2017,7 @@ func init() {
 	runCmd.Flags().String("momento-cache-name", "test-cache", "Momento cache name")
 	runCmd.Flags().Bool("momento-create-cache", true, "Automatically create Momento cache if it doesn't exist")
 	runCmd.Flags().Uint32("momento-client-conn-count", 1, "Set number of TCP conn each momento client creates")
+	runCmd.Flags().Int("momento-client-worker-batch-size", 1, "Set number of requests each perf worker will make")
 
 	// Workload-specific Options
 	runCmd.Flags().Float64("key-zipf-exp", 1.0, "Zipf distribution exponent (0 < exp <= 5), higher = more concentration")
