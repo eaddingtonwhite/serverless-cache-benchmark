@@ -46,7 +46,7 @@ func NewMomentoClient(apiKey, cacheName string, createCache bool, defaultTTLSeco
 		clientConnectCount = 1
 	}
 
-	// try up to 5 times to create the client (in case of network issues)
+	// wait 1 second between retries to create the client (in case of network issues)
 	var client momento.CacheClient
 	for {
 		client, err = momento.NewCacheClient(
