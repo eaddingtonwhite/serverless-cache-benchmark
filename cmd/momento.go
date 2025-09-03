@@ -48,7 +48,7 @@ func NewMomentoClient(apiKey, cacheName string, createCache bool, defaultTTLSeco
 
 	// try up to 5 times to create the client (in case of network issues)
 	var client momento.CacheClient
-	for i := 0; i < 5; i++ {
+	for {
 		client, err = momento.NewCacheClient(
 			config.LaptopLatestWithLogger(loggerFactory).WithNumGrpcChannels(clientConnectCount),
 			credential,
@@ -60,9 +60,6 @@ func NewMomentoClient(apiKey, cacheName string, createCache bool, defaultTTLSeco
 		} else {
 			break
 		}
-	}
-	if client == nil {
-		return nil, fmt.Errorf("failed to create Momento client after 5 attempts")
 	}
 
 	// Try to create the cache if it doesn't exist and createCache is true
