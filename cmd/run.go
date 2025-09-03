@@ -1119,7 +1119,7 @@ func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 		}
 
 		runBatch(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
-			setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, batchSize, &opCount, zipfGen)
+			setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, batchSize, &opCount, zipfGen, verbose)
 	}
 }
 
@@ -1127,7 +1127,7 @@ func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 func runBatch(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
 	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, batchSize int,
-	opCount *int64, zipfGen *ZipfGenerator) {
+	opCount *int64, zipfGen *ZipfGenerator, verbose bool) {
 
 	var wg sync.WaitGroup
 	results := make(chan batchResult, batchSize)
@@ -1138,7 +1138,7 @@ func runBatch(ctx context.Context, workerID int, client CacheClient,
 		go func() {
 			defer wg.Done()
 			result := processSingleRequest(ctx, workerID, client, totalKeys, zipfExp, generator,
-				setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, opCount, zipfGen)
+				setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, opCount, zipfGen, verbose)
 			results <- result
 		}()
 	}
@@ -1181,7 +1181,7 @@ type batchResult struct {
 // processSingleRequest processes a single request and returns the result
 func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator,
-	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, opCount *int64, zipfGen *ZipfGenerator) batchResult {
+	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, opCount *int64, zipfGen *ZipfGenerator, verbose bool) batchResult {
 
 	// Determine operation type based on ratio
 	*opCount++
@@ -1210,6 +1210,9 @@ func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
 		latency := time.Since(start)
 
 		if err != nil {
+			if verbose {
+				log.Printf("Worker %d: Set operation failed for key %s: %v", workerID, key, err)
+			}
 			return batchResult{isSet: true, isError: true, latencyMicros: 0}
 		} else {
 			return batchResult{isSet: true, isError: false, latencyMicros: latency.Microseconds()}
@@ -1221,6 +1224,9 @@ func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
 		latency := time.Since(start)
 
 		if err != nil {
+			if verbose {
+				log.Printf("Worker %d: Get operation failed for key %s: %v", workerID, key, err)
+			}
 			return batchResult{isSet: false, isError: true, latencyMicros: 0}
 		} else {
 			return batchResult{isSet: false, isError: false, latencyMicros: latency.Microseconds()}
