@@ -56,6 +56,7 @@ func NewMomentoClient(apiKey, cacheName string, createCache bool, defaultTTLSeco
 		)
 		if err != nil {
 			log.Printf("failed to create Momento client: %w, retrying...", err)
+			time.Sleep(time.Second * 1)
 		} else {
 			break
 		}
