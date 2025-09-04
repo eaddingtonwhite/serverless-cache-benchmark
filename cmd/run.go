@@ -1269,12 +1269,12 @@ func runMomentoWorkerInternal(ctx context.Context, workerID int, client CacheCli
 	}
 
 	// Use producer-consumer model for continuous request processing
-	runProducerConsumerBatch(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
+	runProducerConsumer(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
 		setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, workerCount, &opCount, zipfGen, verbose, limiter, resultChan)
 }
 
-// runProducerConsumerBatch implements producer-consumer model for continuous request processing
-func runProducerConsumerBatch(ctx context.Context, workerID int, client CacheClient,
+// runProducerConsumer implements producer-consumer model for continuous request processing
+func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
 	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, numConsumers int,
 	opCount *int64, zipfGen *ZipfGenerator, verbose bool, limiter *rate.Limiter, resultChan chan workloadResult) {
