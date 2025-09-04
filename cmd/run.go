@@ -1678,13 +1678,19 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 			elapsed := time.Since(startTime)
 
 			if totalOps > 0 {
+				// Calculate cumulative QPS for CSV logging
 				getQPS := float64(getOps) / elapsed.Seconds()
 				setQPS := float64(setOps) / elapsed.Seconds()
 				totalQPS := getQPS + setQPS
 
-				// Collect latency metrics
-				_, _, _, _, getP50, getP95, getP99 := stats.GetStats.GetStats()
-				_, _, _, _, setP50, setP95, setP99 := stats.SetStats.GetStats()
+				// Get current second stats for progress bar display
+				getCurrentOps, getP50, getP95, getP99, _ := stats.GetStats.GetCurrentSecondStats()
+				setCurrentOps, setP50, setP95, setP99, _ := stats.SetStats.GetCurrentSecondStats()
+
+				// Calculate current second QPS (operations in current second)
+				currentGetQPS := float64(getCurrentOps)
+				currentSetQPS := float64(setCurrentOps)
+				currentTotalQPS := currentGetQPS + currentSetQPS
 
 				// Create progress bar for static workload
 				progressBar := createStaticProgressBar(elapsed, totalDuration)
@@ -1729,12 +1735,12 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 					stats.CSVLogger.LogMetrics(snapshot)
 				}
 
-				// Format the progress line with resource monitoring -- include get/set p99 latencies
+				// Format the progress line with current second stats
 				progressLine := fmt.Sprintf("\r%s | %d clients | %.0f ops/s | GET: %.0f/s | SET: %.0f/s | Mem: %.1fGB/%.1fGB | CPU: %.0f%% | Proc: %.1fGB | Net: %.1f/%.1f MB/s | Get p99: %d μs | Set p99: %d μs",
-					progressBar, clientCount, totalQPS, getQPS, setQPS,
+					progressBar, clientCount, currentTotalQPS, currentGetQPS, currentSetQPS,
 					sysStats.MemoryUsedMB/1024, sysStats.MemoryTotalMB/1024,
 					sysStats.CPUPercent, procMemMB/1024, sysStats.NetworkRxMBps, sysStats.NetworkTxMBps,
-					getP95, setP95)
+					getP99, setP99)
 
 				fmt.Print(progressLine)
 			}
