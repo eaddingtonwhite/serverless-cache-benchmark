@@ -982,9 +982,16 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 
 		wg.Add(1)
 		// Let each worker create its own connection in parallel
-		go runWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
-			generator, stats, batchSize, setRatio, getRatio, keyPrefix, keyMin, limiter,
-			timeoutSeconds, measureSetup, verbose, quiet)
+		switch cacheType {
+		case "momento":
+			go runMomentoWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
+				generator, stats, batchSize, setRatio, getRatio, keyPrefix, keyMin, limiter,
+				timeoutSeconds, measureSetup, verbose, quiet)
+		default:
+			go runWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
+				generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
+				timeoutSeconds, measureSetup, verbose, quiet)
+		}
 	}
 
 	totalSetupTime := time.Since(setupStart)
@@ -1081,6 +1088,97 @@ func runDynamicWorkload(cmd *cobra.Command, trafficPatternFile, cacheType string
 
 // runWorkerInternal contains the actual worker logic without WaitGroup management
 func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
+	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
+	setRatio, getRatio int, keyPrefix string, keyMin int,
+	limiter *rate.Limiter, timeoutSeconds int, verbose bool) {
+
+	// Create a worker-specific Zipf generator with unique seed to ensure different key patterns
+	seed := time.Now().UnixNano() + int64(workerID*1000)
+	if verbose {
+		fmt.Printf("Worker %d: Creating Zipf generator with totalKeys=%d, zipfExp=%f, seed=%d\n",
+			workerID, totalKeys, zipfExp, seed)
+	}
+	zipfGen := NewZipfGenerator(uint64(totalKeys), zipfExp, seed)
+
+	totalRatio := setRatio + getRatio
+	if totalRatio == 0 {
+		return // Nothing to do
+	}
+
+	var opCount int64
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Apply rate limiting if configured
+		if limiter != nil {
+			err := limiter.Wait(ctx)
+			if err != nil {
+				return
+			}
+		}
+
+		// Determine operation type based on ratio
+		opCount++
+		isSet := (opCount % int64(totalRatio)) < int64(setRatio)
+
+		// Generate key using Zipf distribution
+		keyOffset := zipfGen.Next()
+		key := fmt.Sprintf("%s%d", keyPrefix, keyMin+int(keyOffset))
+
+		// Create operation timeout context
+		opCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+
+		if isSet {
+			// Perform SET operation
+			data, err := generator.GenerateData()
+			if err != nil {
+				atomic.AddInt64(&stats.SetErrors, 1)
+				cancel()
+				continue
+			}
+
+			// Get expiration from generator (uses DefaultTTL if set)
+			expiration := generator.GetExpiration()
+
+			start := time.Now()
+			err = client.Set(opCtx, key, data, expiration)
+			latency := time.Since(start)
+			cancel()
+
+			if err != nil {
+				atomic.AddInt64(&stats.SetErrors, 1)
+				stats.RecordOperationInBlock(true, 0, true)
+			} else {
+				atomic.AddInt64(&stats.SetOps, 1)
+				stats.SetStats.RecordLatency(latency.Microseconds())
+				stats.RecordOperationInBlock(true, latency.Microseconds(), false)
+			}
+		} else {
+			// Perform GET operation
+			start := time.Now()
+			_, err := client.Get(opCtx, key)
+			latency := time.Since(start)
+			cancel()
+
+			if err != nil {
+				atomic.AddInt64(&stats.GetErrors, 1)
+				stats.RecordOperationInBlock(false, 0, true)
+			} else {
+				atomic.AddInt64(&stats.GetOps, 1)
+				stats.GetStats.RecordLatency(latency.Microseconds())
+				stats.RecordOperationInBlock(false, latency.Microseconds(), false)
+			}
+		}
+	}
+}
+
+// runMomentoWorkerInternal contains the actual worker logic without WaitGroup management
+func runMomentoWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
 	setRatio, getRatio int, keyPrefix string, batchSize int, keyMin int,
 	limiter *rate.Limiter, timeoutSeconds int, verbose bool) {
@@ -1231,7 +1329,7 @@ func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
 // runWorkerWithConnectionCreation creates its own connection and then runs the worker
 func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, workerID int,
 	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
-	generator *DataGenerator, stats *WorkloadStats, batchSize int, setRatio, getRatio int,
+	generator *DataGenerator, stats *WorkloadStats, setRatio, getRatio int,
 	keyPrefix string, keyMin int, limiter *rate.Limiter, timeoutSeconds int,
 	measureSetup, verbose, quiet bool) {
 
@@ -1259,6 +1357,40 @@ func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, wo
 
 	// Now run the normal worker routine (but don't call wg.Done() again)
 	runWorkerInternal(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
+		setRatio, getRatio, keyPrefix, keyMin, limiter, timeoutSeconds, verbose)
+}
+
+// runMomentoWorkerWithConnectionCreation creates its own connection and then runs the worker
+func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, workerID int,
+	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
+	generator *DataGenerator, stats *WorkloadStats, batchSize int, setRatio, getRatio int,
+	keyPrefix string, keyMin int, limiter *rate.Limiter, timeoutSeconds int,
+	measureSetup, verbose, quiet bool) {
+
+	defer wg.Done()
+
+	// Create cache client in this goroutine (parallel connection creation)
+	var client CacheClient
+	var err error
+
+	if measureSetup {
+		client, err = createAndTestCacheClient(cacheType, cmd, stats)
+	} else {
+		client, err = createCacheClientForRun(cacheType, cmd)
+	}
+
+	if err != nil {
+		// Always log connection failures as they're critical
+		log.Printf("Worker %d: Failed to create client: %v", workerID, err)
+		return
+	}
+
+	if verbose && !quiet {
+		log.Printf("Worker %d: Successfully created client connection", workerID)
+	}
+
+	// Now run the normal worker routine (but don't call wg.Done() again)
+	runMomentoWorkerInternal(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
 		setRatio, getRatio, keyPrefix, batchSize, keyMin, limiter, timeoutSeconds, verbose)
 }
 
@@ -1338,7 +1470,7 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 				wg.Add(1)
 				// Pass connection creation parameters to worker - let it create connection in parallel
 				go runWorkerWithConnectionCreation(workerCtx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
-					generator, stats, batchSize, setRatio, getRatio, keyPrefix, keyMin, limiter,
+					generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
 					timeoutSeconds, measureSetup, verbose, quiet)
 			}
 
@@ -1591,16 +1723,12 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 					stats.CSVLogger.LogMetrics(snapshot)
 				}
 
-				// Format the progress line with resource monitoring
-				progressLine := fmt.Sprintf("\r%s | %d clients | %.0f ops/s | GET: %.0f/s | SET: %.0f/s | Mem: %.1fGB/%.1fGB | CPU: %.0f%% | Proc: %.1fGB | Net: %.1f/%.1f MB/s",
+				// Format the progress line with resource monitoring -- include get/set p99 latencies
+				progressLine := fmt.Sprintf("\r%s | %d clients | %.0f ops/s | GET: %.0f/s | SET: %.0f/s | Mem: %.1fGB/%.1fGB | CPU: %.0f%% | Proc: %.1fGB | Net: %.1f/%.1f MB/s | Get p99: %d μs | Set p99: %d μs",
 					progressBar, clientCount, totalQPS, getQPS, setQPS,
 					sysStats.MemoryUsedMB/1024, sysStats.MemoryTotalMB/1024,
-					sysStats.CPUPercent, procMemMB/1024, sysStats.NetworkRxMBps, sysStats.NetworkTxMBps)
-
-				// Truncate if too long for terminal
-				if len(progressLine) > 150 {
-					progressLine = progressLine[:147] + "..."
-				}
+					sysStats.CPUPercent, procMemMB/1024, sysStats.NetworkRxMBps, sysStats.NetworkTxMBps,
+					getP95, setP95)
 
 				fmt.Print(progressLine)
 			}
@@ -1610,7 +1738,7 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 
 // createStaticProgressBar creates a progress bar for static workload
 func createStaticProgressBar(elapsed, total time.Duration) string {
-	barWidth := 20
+	barWidth := 10
 	progress := float64(elapsed) / float64(total)
 	if progress > 1.0 {
 		progress = 1.0
