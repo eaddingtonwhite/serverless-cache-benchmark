@@ -1507,19 +1507,12 @@ func processRequest(ctx context.Context, request requestInfo, client CacheClient
 
 // processResults processes operation results and updates statistics
 func processResults(ctx context.Context, resultChan <-chan batchResult, stats *WorkloadStats, verbose bool) {
-	var processedCount int64
-	var droppedBlockStats int64
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case result, ok := <-resultChan:
 			if !ok {
 				return // Channel closed
 			}
-
-			processedCount++
 
 			// Update statistics without lock contention
 			if result.isSet {
@@ -1539,17 +1532,6 @@ func processResults(ctx context.Context, resultChan <-chan batchResult, stats *W
 					atomic.AddInt64(&stats.GetOps, 1)
 					stats.GetStats.RecordLatency(result.latencyMicros)
 					recordBlockStatOptimized(stats, false, result.latencyMicros, false)
-				}
-			}
-
-		case <-ticker.C:
-			// Periodically report metrics collection health (only in verbose mode)
-			if verbose && droppedBlockStats > 0 {
-				dropRate := float64(droppedBlockStats) / float64(processedCount) * 100
-				// Only log if drop rate is significant (> 5%) - indicates a real problem
-				if dropRate > 5.0 {
-					log.Printf("[WARNING] Result processor: High drop rate detected - %d ops processed, %d block stats dropped (%.2f%% drop rate)",
-						processedCount, droppedBlockStats, dropRate)
 				}
 			}
 
