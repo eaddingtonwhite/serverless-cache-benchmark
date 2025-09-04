@@ -1607,7 +1607,7 @@ func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
 	}
 }
 
-// runWorkerWithConnectionCreation creates its own connection and then runs the worker (legacy)
+// runWorkerWithConnectionCreation creates its own connection and then runs the worker
 func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, workerID int,
 	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
 	generator *DataGenerator, stats *WorkloadStats, setRatio, getRatio int,
