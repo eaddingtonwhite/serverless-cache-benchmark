@@ -26,7 +26,7 @@ type PerformanceStats struct {
 	errorChannel   chan struct{}
 	done           chan struct{}
 
-	// Per-second histograms (accessed by multiple collector goroutines)
+	// Per-second histograms (only accessed by stats goroutine)
 	currentSecond    int64
 	currentHistogram *hdrhistogram.Histogram
 	secondHistograms map[int64]*hdrhistogram.Histogram
@@ -42,50 +42,44 @@ func NewPerformanceStats() *PerformanceStats {
 		secondHistograms: make(map[int64]*hdrhistogram.Histogram),
 		currentHistogram: hdrhistogram.New(1, 60*1000*1000, 3),
 		latencyChannel:   make(chan LatencyEvent, 1000000), // Buffered channel to prevent blocking
-		errorChannel:     make(chan struct{}, 10000),       // Buffered for errors
+		errorChannel:     make(chan struct{}, 100),         // Buffered for errors
 		done:             make(chan struct{}),
 	}
 
-	// Start multiple stats collection goroutines for high-concurrency scenarios
-	numCollectors := 2 // Multiple collectors to handle high load
-	for i := 0; i < numCollectors; i++ {
-		go ps.statsCollector()
-	}
+	// Start the stats collection goroutine
+	go ps.statsCollector()
 
 	return ps
 }
 
-
-// statsCollector runs in dedicated goroutines to process latency events without locks
+// statsCollector runs in a dedicated goroutine to process latency events without locks
 func (ps *PerformanceStats) statsCollector() {
 	for {
 		select {
 		case event := <-ps.latencyChannel:
 			second := event.Timestamp.Unix()
 
-			// Record in overall histogram (thread-safe RecordValue)
+			// Record in overall histogram (no lock needed, single goroutine)
 			ps.Histogram.RecordValue(event.LatencyMicros)
 
-			// Record in per-second histogram with atomic operations for thread safety
-			currentSec := atomic.LoadInt64(&ps.currentSecond)
-			if second != currentSec {
-				// Try to update current second atomically
-				if atomic.CompareAndSwapInt64(&ps.currentSecond, currentSec, second) {
-					// We won the race - create new histogram for this second
-					ps.currentHistogram = hdrhistogram.New(1, 60*1000*1000, 3)
+			// Record in per-second histogram (no lock needed, single goroutine)
+			if second != ps.currentSecond {
+				if ps.currentHistogram.TotalCount() > 0 {
+					ps.secondHistograms[ps.currentSecond] = ps.currentHistogram
 				}
+				ps.currentSecond = second
+				ps.currentHistogram = hdrhistogram.New(1, 60*1000*1000, 3)
 			}
-			// Always try to record in current histogram (thread-safe)
 			ps.currentHistogram.RecordValue(event.LatencyMicros)
 
-			// Use atomic operations for thread safety with multiple collectors
-			atomic.AddInt64(&ps.SuccessOps, 1)
-			atomic.AddInt64(&ps.TotalOps, 1)
+			// No atomic needed - only this goroutine modifies these counters
+			ps.SuccessOps++
+			ps.TotalOps++
 
 		case <-ps.errorChannel:
-			// Use atomic operations for thread safety
-			atomic.AddInt64(&ps.FailedOps, 1)
-			atomic.AddInt64(&ps.TotalOps, 1)
+			// No atomic needed - only this goroutine modifies these counters
+			ps.FailedOps++
+			ps.TotalOps++
 
 		case <-ps.done:
 			return
@@ -157,7 +151,6 @@ func (ps *PerformanceStats) GetCurrentSecondStats() (int64, int64, int64, int64,
 		ps.currentHistogram.ValueAtQuantile(99),
 		ps.currentHistogram.Max()
 }
-
 
 // GetOverallStats returns overall statistics
 func (ps *PerformanceStats) GetOverallStats() (int64, int64, int64, float64) {
