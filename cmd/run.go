@@ -726,16 +726,15 @@ func createAndTestCacheClient(cacheType string, cmd *cobra.Command, stats *Workl
 	}
 
 	// Test connectivity with ping
-	// PING Already happens under hood when establishing client dont need to do a second time
-	//ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	//defer cancel()
-	//
-	//err = client.Ping(ctx)
-	//if err != nil {
-	//	client.Close()
-	//	return nil, fmt.Errorf("ping failed: %w", err)
-	//}
-	//
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = client.Ping(ctx)
+	if err != nil {
+		client.Close()
+		return nil, fmt.Errorf("ping failed: %w", err)
+	}
+
 	// Record setup time
 	setupTime := time.Since(setupStart)
 	stats.SetupStats.RecordLatency(setupTime.Microseconds())
@@ -1051,105 +1050,109 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 		cancel() // Cancel context to stop all workers
 	}()
 
-	// Phase 1: Setup all connections first (for accurate connection setup measurement)
-
-	// Calculate total TCP connections for Momento clients
-	var totalConnections int64 = int64(clientCount)
-	if cacheType == "momento" {
-		clientConnCount, _ := cmd.Flags().GetUint32("momento-client-conn-count")
-		totalConnections = int64(clientCount) * int64(clientConnCount)
-		fmt.Printf("Phase 1: Setting up %d Momento clients (%d TCP connections total)...\n", clientCount, totalConnections)
-	} else {
-		fmt.Printf("Phase 1: Setting up %d client connections...\n", clientCount)
-	}
-
-	setupStart := time.Now()
-	clients := make([]CacheClient, clientCount)
-	var setupWG sync.WaitGroup
-	var setupErrors int64
-
-	// Create all connections in parallel first
-	for i := 0; i < clientCount; i++ {
-		setupWG.Add(1)
-		go func(clientID int) {
-			defer setupWG.Done()
-
-			var client CacheClient
-			var err error
-
-			if measureSetup {
-				client, err = createAndTestCacheClient(cacheType, cmd, stats)
-			} else {
-				client, err = createCacheClientForRun(cacheType, cmd)
-			}
-
-			if err != nil {
-				log.Printf("Client %d: Failed to create connection: %v", clientID, err)
-				atomic.AddInt64(&setupErrors, 1)
-				return
-			}
-
-			clients[clientID] = client
-			if verbose && !quiet {
-				log.Printf("Client %d: Connection established successfully", clientID)
-			}
-		}(i)
-	}
-
-	// Wait for all connections to be established
-	setupWG.Wait()
-	totalSetupTime := time.Since(setupStart)
-
-	if setupErrors > 0 {
-		log.Fatalf("Failed to establish %d out of %d connections. Aborting test.", setupErrors, clientCount)
-	}
-
-	if measureSetup {
-		if cacheType == "momento" {
-			fmt.Printf("Phase 1 Complete: All %d clients established (%d TCP connections total) in %.2f seconds (including connectivity tests)\n", clientCount, totalConnections, totalSetupTime.Seconds())
-		} else {
-			fmt.Printf("Phase 1 Complete: All %d connections established in %.2f seconds (including connectivity tests)\n", clientCount, totalSetupTime.Seconds())
-		}
-	} else {
-		if cacheType == "momento" {
-			fmt.Printf("Phase 1 Complete: All %d clients established (%d TCP connections total) in %.2f seconds\n", clientCount, totalConnections, totalSetupTime.Seconds())
-		} else {
-			fmt.Printf("Phase 1 Complete: All %d connections established in %.2f seconds\n", clientCount, totalSetupTime.Seconds())
-		}
-	}
-
-	// Phase 2: Start workload with pre-established connections
-	if cacheType == "momento" {
-		fmt.Printf("Phase 2: Starting workload with %d pre-established clients (%d TCP connections total)...\n", clientCount, totalConnections)
-	} else {
-		fmt.Printf("Phase 2: Starting workload with %d pre-established connections...\n", clientCount)
-	}
-
+	// If using redis cache, proceed with normal setup. If using momento, pre-establish connections
+	// for accurate connection setup measurement before starting the workload.
 	var wg sync.WaitGroup
 
-	for i := 0; i < clientCount; i++ {
-		// Create rate limiter for this client if specified
-		var limiter *rate.Limiter
-		if rps > 0 {
-			clientRPS := float64(rps) / float64(clientCount)
-			limiter = rate.NewLimiter(rate.Limit(clientRPS), 1)
+	// For pre-allocated clients (for momento)
+	clients := make([]CacheClient, clientCount)
+
+	switch cacheType {
+	case "redis":
+		fmt.Printf("Setting up %d clients...\n", clientCount)
+		setupStart := time.Now()
+
+		for i := 0; i < clientCount; i++ {
+			// Create rate limiter for this client if specified
+			var limiter *rate.Limiter
+			if rps > 0 {
+				clientRPS := float64(rps) / float64(clientCount)
+				limiter = rate.NewLimiter(rate.Limit(clientRPS), 1)
+			}
+
+			wg.Add(1)
+			// Let each worker create its own connection in parallel
+			go runWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
+				generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
+				timeoutSeconds, measureSetup, verbose, quiet)
 		}
 
-		wg.Add(1)
-		// Start worker with pre-established connection
-		switch cacheType {
-		case "momento":
+		totalSetupTime := time.Since(setupStart)
+		if measureSetup {
+			fmt.Printf("All clients setup completed in %.2f seconds (including connectivity tests)\n", totalSetupTime.Seconds())
+		} else {
+			fmt.Printf("All clients setup completed in %.2f seconds\n", totalSetupTime.Seconds())
+		}
+	case "momento":
+		// Phase 1: Setup all connections first (for accurate connection setup measurement)
+
+		// Calculate total TCP connections for Momento clients
+		var totalConnections int64 = int64(clientCount)
+		if cacheType == "momento" {
+			clientConnCount, _ := cmd.Flags().GetUint32("momento-client-conn-count")
+			totalConnections = int64(clientCount) * int64(clientConnCount)
+			fmt.Printf("Phase 1: Setting up %d Momento clients (%d TCP connections total)...\n", clientCount, totalConnections)
+		} else {
+			fmt.Printf("Phase 1: Setting up %d client connections...\n", clientCount)
+		}
+
+		setupStart := time.Now()
+		var setupWG sync.WaitGroup
+		var setupErrors int64
+
+		// Create all connections in parallel before starting the workload
+		for i := 0; i < clientCount; i++ {
+			setupWG.Add(1)
+			go func(clientID int) {
+				defer setupWG.Done()
+
+				// No need for measureSetup ping, just create the cache client as
+				// eager connection already occurs under the hood.
+				client, err := createCacheClientForRun(cacheType, cmd)
+				if err != nil {
+					log.Printf("Client %d: Failed to create connection: %v", clientID, err)
+					atomic.AddInt64(&setupErrors, 1)
+					return
+				}
+
+				clients[clientID] = client
+				if verbose && !quiet {
+					log.Printf("Client %d: Connection established successfully", clientID)
+				}
+			}(i)
+		}
+
+		// Wait for all connections to be established
+		setupWG.Wait()
+		totalSetupTime := time.Since(setupStart)
+
+		if setupErrors > 0 {
+			log.Fatalf("Failed to establish %d out of %d connections. Aborting test.", setupErrors, clientCount)
+		}
+
+		fmt.Printf("Phase 1 Complete: All %d clients established (%d TCP connections total) in %.2f seconds (including connectivity tests)\n", clientCount, totalConnections, totalSetupTime.Seconds())
+
+		// Phase 2: Start workload with pre-established connections
+		fmt.Printf("Phase 2: Starting workload with %d pre-established clients (%d TCP connections total)...\n", clientCount, totalConnections)
+
+		for i := 0; i < clientCount; i++ {
+			// Create rate limiter for this client if specified
+			var limiter *rate.Limiter
+			if rps > 0 {
+				clientRPS := float64(rps) / float64(clientCount)
+				limiter = rate.NewLimiter(rate.Limit(clientRPS), 1)
+			}
+
+			wg.Add(1)
+			// Start worker with pre-established connection
 			go runMomentoWorkerWithEstablishedConnection(ctx, &wg, i, clients[i], totalKeys, zipfExp,
 				generator, stats, batchSize, setRatio, getRatio, keyPrefix, keyMin, limiter,
 				timeoutSeconds, verbose)
-		default:
-			go runWorkerWithEstablishedConnection(ctx, &wg, i, clients[i], totalKeys, zipfExp,
-				generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
-				timeoutSeconds, verbose)
 		}
+		fmt.Printf("All workers started with pre-established connections. Beginning load test...\n")
+	default:
+		log.Fatalf("Invalid cache type: %s", cacheType)
 	}
-
-	fmt.Printf("All workers started with pre-established connections. Beginning load test...\n")
 
 	// Start progress reporting
 	go reportStaticProgress(ctx, stats, testTime, clientCount, verbose)
@@ -1157,7 +1160,7 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 	// Wait for all workers to complete
 	wg.Wait()
 
-	// Close all client connections
+	// Close all pre-allocated client connections
 	for i, client := range clients {
 		if client != nil {
 			client.Close()
@@ -1604,17 +1607,6 @@ func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
 	}
 }
 
-// runWorkerWithEstablishedConnection runs worker with pre-established connection
-func runWorkerWithEstablishedConnection(ctx context.Context, wg *sync.WaitGroup, workerID int,
-	client CacheClient, totalKeys int, zipfExp float64, generator *DataGenerator,
-	stats *WorkloadStats, setRatio, getRatio int, keyPrefix string, keyMin int,
-	limiter *rate.Limiter, timeoutSeconds int, verbose bool) {
-
-	defer wg.Done()
-	runWorkerInternal(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
-		setRatio, getRatio, keyPrefix, keyMin, limiter, timeoutSeconds, verbose)
-}
-
 // runWorkerWithConnectionCreation creates its own connection and then runs the worker (legacy)
 func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, workerID int,
 	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
@@ -1661,108 +1653,68 @@ func runMomentoWorkerWithEstablishedConnection(ctx context.Context, wg *sync.Wai
 		setRatio, getRatio, keyPrefix, batchSize, keyMin, limiter, timeoutSeconds, verbose)
 }
 
-// runMomentoWorkerWithConnectionCreation creates its own connection and then runs the worker (legacy)
-func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, workerID int,
-	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
-	generator *DataGenerator, stats *WorkloadStats, batchSize int, setRatio, getRatio int,
-	keyPrefix string, keyMin int, limiter *rate.Limiter, timeoutSeconds int,
-	measureSetup, verbose, quiet bool) {
-
-	defer wg.Done()
-
-	// Create cache client in this goroutine (parallel connection creation)
-	var client CacheClient
-	var err error
-
-	if measureSetup {
-		client, err = createAndTestCacheClient(cacheType, cmd, stats)
-	} else {
-		client, err = createCacheClientForRun(cacheType, cmd)
-	}
-
-	if err != nil {
-		// Always log connection failures as they're critical
-		log.Printf("Worker %d: Failed to create client: %v", workerID, err)
-		return
-	}
-	defer client.Close()
-
-	if verbose && !quiet {
-		log.Printf("Worker %d: Successfully created client connection", workerID)
-	}
-
-	// Now run the normal worker routine (but don't call wg.Done() again)
-	runMomentoWorkerInternal(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
-		setRatio, getRatio, keyPrefix, batchSize, keyMin, limiter, timeoutSeconds, verbose)
-}
-
 // manageTrafficPattern manages dynamic client scaling and QPS changes
 func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheType string,
 	cmd *cobra.Command, generator *DataGenerator, stats *WorkloadStats,
 	setRatio, getRatio int, keyPrefix string, batchSize int, keyMin, totalKeys int, zipfExp float64,
 	measureSetup, verbose, quiet bool, timeoutSeconds int) {
 
-	// Calculate maximum clients needed across all configs
+	// If using redis cache, proceed with normal setup. If using momento, pre-establish connections
+	// for accurate connection setup measurement before starting the workload.
+	var activeWorkers []context.CancelFunc
+	var wg sync.WaitGroup
+
+	// Phase 1: Pre-establish maximum number of connections needed
+
+	// Calculate maximum clients needed across all configs for momento clients.
 	maxClients := 0
 	for _, config := range configs {
 		if config.Clients > maxClients {
 			maxClients = config.Clients
 		}
 	}
-
-	// Phase 1: Pre-establish maximum number of connections needed
-	fmt.Printf("Dynamic workload: Pre-establishing %d connections for scaling...\n", maxClients)
-	setupStart := time.Now()
 	preallocatedClients := make([]CacheClient, maxClients)
-	var setupWG sync.WaitGroup
-	var setupErrors int64
 
-	// Create all connections in parallel first
-	for i := 0; i < maxClients; i++ {
-		setupWG.Add(1)
-		go func(clientID int) {
-			defer setupWG.Done()
+	if cacheType == "momento" {
+		fmt.Printf("Dynamic workload: Pre-establishing %d connections for scaling...\n", maxClients)
+		var setupWG sync.WaitGroup
+		var setupErrors int64
+		setupStart := time.Now()
 
-			var client CacheClient
-			var err error
+		// Create all connections in parallel first
+		for i := 0; i < maxClients; i++ {
+			setupWG.Add(1)
+			go func(clientID int) {
+				defer setupWG.Done()
 
-			if measureSetup {
-				client, err = createAndTestCacheClient(cacheType, cmd, stats)
-			} else {
-				client, err = createCacheClientForRun(cacheType, cmd)
-			}
+				// No need for measureSetup ping, just create the cache client as
+				// eager connection already occurs under the hood.
+				client, err := createCacheClientForRun(cacheType, cmd)
+				if err != nil {
+					log.Printf("Client %d: Failed to create connection: %v", clientID, err)
+					atomic.AddInt64(&setupErrors, 1)
+					return
+				}
 
-			if err != nil {
-				log.Printf("Client %d: Failed to create connection: %v", clientID, err)
-				atomic.AddInt64(&setupErrors, 1)
-				return
-			}
+				preallocatedClients[clientID] = client
+				if verbose && !quiet {
+					log.Printf("Client %d: Connection pre-established for dynamic workload", clientID)
+				}
+			}(i)
+		}
 
-			preallocatedClients[clientID] = client
-			if verbose && !quiet {
-				log.Printf("Client %d: Connection pre-established for dynamic workload", clientID)
-			}
-		}(i)
-	}
+		// Wait for all connections to be established
+		setupWG.Wait()
+		totalSetupTime := time.Since(setupStart)
 
-	// Wait for all connections to be established
-	setupWG.Wait()
-	totalSetupTime := time.Since(setupStart)
+		if setupErrors > 0 {
+			log.Fatalf("Failed to pre-establish %d out of %d connections. Aborting dynamic workload.", setupErrors, maxClients)
+		}
 
-	if setupErrors > 0 {
-		log.Fatalf("Failed to pre-establish %d out of %d connections. Aborting dynamic workload.", setupErrors, maxClients)
-	}
-
-	if measureSetup {
 		fmt.Printf("Dynamic setup complete: All %d connections pre-established in %.2f seconds (including connectivity tests)\n", maxClients, totalSetupTime.Seconds())
-	} else {
-		fmt.Printf("Dynamic setup complete: All %d connections pre-established in %.2f seconds\n", maxClients, totalSetupTime.Seconds())
 	}
 
-	// Phase 2: Start dynamic traffic management with pre-established connections
-
-	var activeWorkers []context.CancelFunc
-	var wg sync.WaitGroup
+	// Phase 2: Start dynamic traffic management
 	startTime := time.Now()
 
 	for i, config := range configs {
@@ -1829,19 +1781,21 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 				activeWorkers = append(activeWorkers, workerCancel)
 
 				wg.Add(1)
-				// Use pre-established connection instead of creating new one
 				switch cacheType {
+				case "redis":
+					// Pass connection creation parameters to worker - let it create connection in parallel
+					go runWorkerWithConnectionCreation(workerCtx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
+						generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
+						timeoutSeconds, measureSetup, verbose, quiet)
 				case "momento":
+					// Use pre-established connection instead of creating new one
 					go runMomentoWorkerWithEstablishedConnection(workerCtx, &wg, i, preallocatedClients[i], totalKeys, zipfExp,
 						generator, stats, batchSize, setRatio, getRatio, keyPrefix, keyMin, limiter,
 						timeoutSeconds, verbose)
 				default:
-					go runWorkerWithEstablishedConnection(workerCtx, &wg, i, preallocatedClients[i], totalKeys, zipfExp,
-						generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
-						timeoutSeconds, verbose)
+					log.Fatalf("Invalid cache type: %s", cacheType)
 				}
 			}
-
 			fmt.Printf("  Successfully initiated %d new workers\n", newWorkers)
 		}
 	}
