@@ -1020,11 +1020,11 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 
 	// Momento clients will send grpc results to this channel and a single
 	// goroutine will process them and increment stats as needed.
-	var resultChan chan batchResult
+	var resultChan chan workloadResult
 	var resultWG sync.WaitGroup
 
 	if cacheType == "momento" {
-		resultChan = make(chan batchResult, clientCount*workerCount*2) // buffer to prevent blocking
+		resultChan = make(chan workloadResult, clientCount*workerCount*2) // buffer to prevent blocking
 		// Start result processor goroutine
 		resultWG.Add(1)
 		go func() {
@@ -1248,7 +1248,7 @@ func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 func runMomentoWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
 	setRatio, getRatio int, keyPrefix string, workerCount int, keyMin int,
-	limiter *rate.Limiter, timeoutSeconds int, verbose bool, resultChan chan batchResult) {
+	limiter *rate.Limiter, timeoutSeconds int, verbose bool, resultChan chan workloadResult) {
 
 	// Create a worker-specific Zipf generator with unique seed to ensure different key patterns
 	seed := time.Now().UnixNano() + int64(workerID*1000)
@@ -1277,7 +1277,7 @@ func runMomentoWorkerInternal(ctx context.Context, workerID int, client CacheCli
 func runProducerConsumerBatch(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
 	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, numConsumers int,
-	opCount *int64, zipfGen *ZipfGenerator, verbose bool, limiter *rate.Limiter, resultChan chan batchResult) {
+	opCount *int64, zipfGen *ZipfGenerator, verbose bool, limiter *rate.Limiter, resultChan chan workloadResult) {
 
 	// Create channels for producer-consumer communication
 	requestChan := make(chan requestInfo, numConsumers*2) // Buffer to prevent blocking
@@ -1351,7 +1351,7 @@ type requestInfo struct {
 
 // processRequest processes a single cache request
 func processRequest(ctx context.Context, request requestInfo, client CacheClient,
-	generator *DataGenerator, timeoutSeconds int, verbose bool) batchResult {
+	generator *DataGenerator, timeoutSeconds int, verbose bool) workloadResult {
 	// Create operation timeout context before timing
 	opCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
@@ -1360,7 +1360,7 @@ func processRequest(ctx context.Context, request requestInfo, client CacheClient
 		// Generate data BEFORE timing the operation
 		data, err := generator.GenerateData()
 		if err != nil {
-			return batchResult{isSet: true, isError: true, latencyMicros: 0}
+			return workloadResult{isSet: true, isError: true, latencyMicros: 0}
 		}
 
 		// Get expiration from generator (uses DefaultTTL if set)
@@ -1375,9 +1375,9 @@ func processRequest(ctx context.Context, request requestInfo, client CacheClient
 			if verbose {
 				log.Printf("Worker %d: Set operation failed for key %s: %v", request.workerID, request.key, err)
 			}
-			return batchResult{isSet: true, isError: true, latencyMicros: 0}
+			return workloadResult{isSet: true, isError: true, latencyMicros: 0}
 		} else {
-			return batchResult{isSet: true, isError: false, latencyMicros: latency.Microseconds()}
+			return workloadResult{isSet: true, isError: false, latencyMicros: latency.Microseconds()}
 		}
 	} else {
 		// Perform GET operation
@@ -1390,15 +1390,15 @@ func processRequest(ctx context.Context, request requestInfo, client CacheClient
 			if verbose {
 				log.Printf("Worker %d: Get operation failed for key %s: %v", request.workerID, request.key, err)
 			}
-			return batchResult{isSet: false, isError: true, latencyMicros: 0}
+			return workloadResult{isSet: false, isError: true, latencyMicros: 0}
 		} else {
-			return batchResult{isSet: false, isError: false, latencyMicros: latency.Microseconds()}
+			return workloadResult{isSet: false, isError: false, latencyMicros: latency.Microseconds()}
 		}
 	}
 }
 
 // processResults processes operation results and updates statistics
-func processResults(ctx context.Context, resultChan <-chan batchResult, stats *WorkloadStats, verbose bool) {
+func processResults(ctx context.Context, resultChan <-chan workloadResult, stats *WorkloadStats, verbose bool) {
 	for {
 		select {
 		case result, ok := <-resultChan:
@@ -1433,8 +1433,8 @@ func processResults(ctx context.Context, resultChan <-chan batchResult, stats *W
 	}
 }
 
-// batchResult represents the result of a single request operation
-type batchResult struct {
+// workloadResult represents the result of a single request operation
+type workloadResult struct {
 	isSet         bool
 	isError       bool
 	latencyMicros int64
@@ -1443,7 +1443,7 @@ type batchResult struct {
 // processSingleRequest processes a single request and returns the result
 func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator,
-	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, opCount *int64, zipfGen *ZipfGenerator, verbose bool) batchResult {
+	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, opCount *int64, zipfGen *ZipfGenerator, verbose bool) workloadResult {
 
 	// Determine operation type based on ratio
 	*opCount++
@@ -1461,7 +1461,7 @@ func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
 		// Perform SET operation
 		data, err := generator.GenerateData()
 		if err != nil {
-			return batchResult{isSet: true, isError: true, latencyMicros: 0}
+			return workloadResult{isSet: true, isError: true, latencyMicros: 0}
 		}
 
 		// Get expiration from generator (uses DefaultTTL if set)
@@ -1475,9 +1475,9 @@ func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
 			if verbose {
 				log.Printf("Worker %d: Set operation failed for key %s: %v", workerID, key, err)
 			}
-			return batchResult{isSet: true, isError: true, latencyMicros: 0}
+			return workloadResult{isSet: true, isError: true, latencyMicros: 0}
 		} else {
-			return batchResult{isSet: true, isError: false, latencyMicros: latency.Microseconds()}
+			return workloadResult{isSet: true, isError: false, latencyMicros: latency.Microseconds()}
 		}
 	} else {
 		// Perform GET operation
@@ -1489,9 +1489,9 @@ func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
 			if verbose {
 				log.Printf("Worker %d: Get operation failed for key %s: %v", workerID, key, err)
 			}
-			return batchResult{isSet: false, isError: true, latencyMicros: 0}
+			return workloadResult{isSet: false, isError: true, latencyMicros: 0}
 		} else {
-			return batchResult{isSet: false, isError: false, latencyMicros: latency.Microseconds()}
+			return workloadResult{isSet: false, isError: false, latencyMicros: latency.Microseconds()}
 		}
 	}
 }
@@ -1536,7 +1536,7 @@ func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGr
 	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
 	generator *DataGenerator, stats *WorkloadStats, workerCount int, setRatio, getRatio int,
 	keyPrefix string, keyMin int, limiter *rate.Limiter, timeoutSeconds int,
-	measureSetup, verbose, quiet bool, resultChan chan batchResult) {
+	measureSetup, verbose, quiet bool, resultChan chan workloadResult) {
 
 	defer wg.Done()
 
@@ -1573,7 +1573,7 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 
 	// Momento clients will send grpc results to this channel and a single
 	// goroutine will process them and increment stats as needed.
-	var resultChan chan batchResult
+	var resultChan chan workloadResult
 	var resultWG sync.WaitGroup
 
 	if cacheType == "momento" {
@@ -1585,7 +1585,7 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 			}
 		}
 
-		resultChan = make(chan batchResult, maxClients*workerCount*2) // buffer to prevent blocking
+		resultChan = make(chan workloadResult, maxClients*workerCount*2) // buffer to prevent blocking
 		// Start result processor goroutine
 		resultWG.Add(1)
 		go func() {
