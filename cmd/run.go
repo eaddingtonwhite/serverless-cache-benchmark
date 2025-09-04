@@ -315,44 +315,6 @@ func (ws *WorkloadStats) RecordOperationInBlock(isSet bool, latencyMicros int64,
 	}
 }
 
-// recordBlockStatOptimized reduces lock contention with backoff retry
-func recordBlockStatOptimized(stats *WorkloadStats, isSet bool, latencyMicros int64, isError bool) {
-	// Try to acquire read lock with brief backoff
-	for attempts := 0; attempts < 3; attempts++ {
-		if stats.BlockMutex.TryRLock() {
-			defer stats.BlockMutex.RUnlock()
-			break
-		}
-		// Brief backoff - only for first 2 attempts
-		if attempts < 2 {
-			time.Sleep(time.Microsecond * 10) // 10 microsecond backoff
-		} else {
-			// After 3 attempts, skip to avoid blocking (rare case)
-			return
-		}
-	}
-
-	if stats.CurrentBlock == nil {
-		return
-	}
-
-	if isSet {
-		if isError {
-			atomic.AddInt64(&stats.CurrentBlock.SetErrors, 1)
-		} else {
-			atomic.AddInt64(&stats.CurrentBlock.ActualSetOps, 1)
-			stats.CurrentBlock.SetStats.RecordLatency(latencyMicros)
-		}
-	} else {
-		if isError {
-			atomic.AddInt64(&stats.CurrentBlock.GetErrors, 1)
-		} else {
-			atomic.AddInt64(&stats.CurrentBlock.ActualGetOps, 1)
-			stats.CurrentBlock.GetStats.RecordLatency(latencyMicros)
-		}
-	}
-}
-
 // runCmd represents the run command
 var runCmd = &cobra.Command{
 	Use:   "run",
