@@ -1867,7 +1867,7 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 
 // createStaticProgressBar creates a progress bar for static workload
 func createStaticProgressBar(elapsed, total time.Duration) string {
-	barWidth := 10
+	barWidth := 20
 	progress := float64(elapsed) / float64(total)
 	if progress > 1.0 {
 		progress = 1.0
