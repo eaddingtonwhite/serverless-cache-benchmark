@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -29,9 +30,9 @@ type PerformanceStats struct {
 	done           chan struct{}
 
 	// Per-second histograms (only accessed by stats goroutine)
-	currentSecond    int64
-	currentHistogram *hdrhistogram.Histogram
-	secondHistograms map[int64]*hdrhistogram.Histogram
+	currentMetricWindowStartSecond int64
+	currentHistogram               *hdrhistogram.Histogram
+	monitoringWindowHistograms     map[int64]*hdrhistogram.Histogram
 }
 
 func NewPerformanceStats() *PerformanceStats {
@@ -39,13 +40,13 @@ func NewPerformanceStats() *PerformanceStats {
 	hist := hdrhistogram.New(1, 60*1000*1000, 3)
 
 	ps := &PerformanceStats{
-		Histogram:        hist,
-		StartTime:        time.Now(),
-		secondHistograms: make(map[int64]*hdrhistogram.Histogram),
-		currentHistogram: hdrhistogram.New(1, 60*1000*1000, 3),
-		latencyChannel:   make(chan LatencyEvent, 1000000), // Buffered channel to prevent blocking
-		errorChannel:     make(chan struct{}, 100),         // Buffered for errors
-		done:             make(chan struct{}),
+		Histogram:                  hist,
+		StartTime:                  time.Now(),
+		monitoringWindowHistograms: make(map[int64]*hdrhistogram.Histogram),
+		currentHistogram:           hdrhistogram.New(1, 60*1000*1000, 3),
+		latencyChannel:             make(chan LatencyEvent, 1000000), // Buffered channel to prevent blocking
+		errorChannel:               make(chan struct{}, 100),         // Buffered for errors
+		done:                       make(chan struct{}),
 	}
 
 	// Start the stats collection goroutine
@@ -59,20 +60,26 @@ func (ps *PerformanceStats) statsCollector() {
 	for {
 		select {
 		case event := <-ps.latencyChannel:
-			second := event.Timestamp.Unix()
+			currentSecond := event.Timestamp.Unix()
 
 			// Record in overall histogram (no lock needed, single goroutine)
-			ps.Histogram.RecordValue(event.LatencyMicros)
+			overallHistErr := ps.Histogram.RecordValue(event.LatencyMicros)
+			if overallHistErr != nil {
+				fmt.Printf("Error recording overall histogram latency: %v\n", overallHistErr)
+			}
 
-			// Record in per-second histogram (no lock needed, single goroutine)
-			if second-ps.currentSecond >= MetricWindowTimeSeconds {
+			// Record in per-moniroting-window histogram (no lock needed, single goroutine)
+			if currentSecond-ps.currentMetricWindowStartSecond >= MetricWindowTimeSeconds {
 				if ps.currentHistogram.TotalCount() > 0 {
-					ps.secondHistograms[ps.currentSecond] = ps.currentHistogram
+					ps.monitoringWindowHistograms[ps.currentMetricWindowStartSecond] = ps.currentHistogram
 				}
-				ps.currentSecond = second
+				ps.currentMetricWindowStartSecond = currentSecond
 				ps.currentHistogram = hdrhistogram.New(1, 60*1000*1000, 3)
 			}
-			ps.currentHistogram.RecordValue(event.LatencyMicros)
+			currentHistErr := ps.currentHistogram.RecordValue(event.LatencyMicros)
+			if currentHistErr != nil {
+				fmt.Printf("Error recording overall histogram latency: %v\n", overallHistErr)
+			}
 
 			// No atomic needed - only this goroutine modifies these counters
 			ps.SuccessOps++
