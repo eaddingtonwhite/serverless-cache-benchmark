@@ -1725,9 +1725,8 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 				// Calculate cumulative QPS for CSV logging
 
 				// Get current second stats for progress bar display
-				getCurrentOps, getP50, getP95, getP99, getMax := stats.GetStats.GetCurrentSecondStats()
-				setCurrentOps, setP50, setP95, setP99, setMax := stats.SetStats.GetCurrentSecondStats()
-				stats.SetStats.GetCurrentSecondStats()
+				getCurrentOps, getP50, getP95, getP99, getMax := stats.GetStats.GetPrevSecondStats()
+				setCurrentOps, setP50, setP95, setP99, setMax := stats.SetStats.GetPrevSecondStats()
 				// Calculate current second QPS (operations in current second)
 				currentGetQPS := float64(getCurrentOps)
 				currentSetQPS := float64(setCurrentOps)
