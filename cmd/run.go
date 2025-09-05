@@ -1070,8 +1070,8 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 	wg.Wait()
 
 	if resultChan != nil {
-		close(resultChan)
 		resultWG.Wait()
+		close(resultChan)
 	}
 
 	// Clear progress line and print final results
@@ -1689,8 +1689,8 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 	wg.Wait()
 
 	if resultChan != nil {
-		close(resultChan)
 		resultWG.Wait()
+		close(resultChan)
 	}
 }
 
