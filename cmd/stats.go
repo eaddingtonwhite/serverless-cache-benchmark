@@ -154,16 +154,6 @@ func (ps *PerformanceStats) GetPreviousWindowStats() (int64, int64, int64, int64
 		histToUse.Max()
 }
 
-// GetOverallStats returns overall statistics
-func (ps *PerformanceStats) GetOverallStats() (int64, int64, int64, float64) {
-	total := atomic.LoadInt64(&ps.TotalOps)
-	success := atomic.LoadInt64(&ps.SuccessOps)
-	failed := atomic.LoadInt64(&ps.FailedOps)
-	qps := ps.GetQPS()
-
-	return total, success, failed, qps
-}
-
 // Close shuts down the stats collector goroutine
 func (ps *PerformanceStats) Close() {
 	close(ps.done)

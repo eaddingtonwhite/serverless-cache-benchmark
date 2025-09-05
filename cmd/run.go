@@ -136,17 +136,18 @@ type MetricsSnapshot struct {
 
 // WorkloadStats tracks workload performance metrics
 type WorkloadStats struct {
-	GetOps       int64
-	SetOps       int64
-	GetErrors    int64
-	SetErrors    int64
-	GetStats     *PerformanceStats
-	SetStats     *PerformanceStats
-	SetupStats   *PerformanceStats // For client setup time measurement
-	TimeBlocks   []TimeBlockStats  // Performance per time block
-	CurrentBlock *TimeBlockStats   // Currently active time block
-	BlockMutex   sync.RWMutex      // Protects time block operations
-	CSVLogger    *CSVLogger        // CSV output logger
+	GetOps                 int64
+	SetOps                 int64
+	GetErrors              int64
+	SetErrors              int64
+	GetStats               *PerformanceStats
+	SetStats               *PerformanceStats
+	SetupStats             *PerformanceStats // For client setup time measurement
+	TimeBlocks             []TimeBlockStats  // Performance per time block
+	CurrentBlock           *TimeBlockStats   // Currently active time block
+	BlockMutex             sync.RWMutex      // Protects time block operations
+	CSVLogger              *CSVLogger        // CSV output logger
+	EstablishedClientCount atomic.Uint32
 }
 
 func NewWorkloadStats() *WorkloadStats {
@@ -313,6 +314,14 @@ func (ws *WorkloadStats) RecordOperationInBlock(isSet bool, latencyMicros int64,
 			ws.CurrentBlock.GetStats.RecordLatency(latencyMicros)
 		}
 	}
+}
+
+func (ws *WorkloadStats) IncrementEstablishedClientCount() {
+	ws.EstablishedClientCount.Add(1)
+}
+
+func (ws *WorkloadStats) GetEstablishedClientCount() uint32 {
+	return ws.EstablishedClientCount.Load()
 }
 
 // runCmd represents the run command
@@ -1423,6 +1432,7 @@ func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, wo
 	if verbose && !quiet {
 		log.Printf("Worker %d: Successfully created client connection", workerID)
 	}
+	stats.IncrementEstablishedClientCount()
 
 	// Now run the normal worker routine (but don't call wg.Done() again)
 	runWorkerInternal(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
@@ -1448,10 +1458,12 @@ func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGr
 		log.Printf("Worker %d: Failed to create client: %v", workerID, err)
 		return
 	}
+	stats.IncrementEstablishedClientCount()
 
 	if verbose && !quiet {
 		clientConnCount, _ := cmd.Flags().GetUint32("momento-client-conn-count")
 		log.Printf("Worker %d: Successfully created Momento client with %d TCP connections", workerID, clientConnCount)
+		log.Printf("Now at EstablishedClientCount: %d", stats.GetEstablishedClientCount())
 	}
 
 	// Now run the normal worker routine (but don't call wg.Done() again)
@@ -1660,7 +1672,7 @@ func reportProgress(ctx context.Context, stats *WorkloadStats, verbose bool) {
 						"  CPU     : %.0f%%\n"+
 						"  ProcMem : %.1fGB\n"+
 						"  Network : Rx %.1f MB/s | Tx %.1f MB/s\n"+
-						"  TotalOutBoundConn : %d",
+						"  TotalOutBoundConn : %d\n",
 					progressBar,
 					currentClients,
 					currentTotalQPS, currentWindowGetOps, currentWindowSetOps,
@@ -1725,15 +1737,9 @@ func createProgressBar(elapsed time.Duration, stats *WorkloadStats) string {
 	return fmt.Sprintf("%s %s", bar, timeStr)
 }
 
-// getCurrentClientCount returns the current number of active clients
+// getCurrentClientCount returns the current number of active, established clients
 func getCurrentClientCount(stats *WorkloadStats) int {
-	stats.BlockMutex.RLock()
-	defer stats.BlockMutex.RUnlock()
-
-	if stats.CurrentBlock != nil {
-		return stats.CurrentBlock.Config.Clients
-	}
-	return 0
+	return int(stats.EstablishedClientCount.Load())
 }
 
 // getCurrentTargetInfo returns current target clients and QPS
@@ -1826,21 +1832,21 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 
 				progressLine := fmt.Sprintf(
 					"\n%s\n"+
-						"Clients : %d\n"+
+						" Established Clients : %d\n"+
 						"\n"+
-						"Throughput\n"+
-						"  Ops/s   : Overall: %.0f  |  GET: %.0f/s  |  SET: %.0f/s\n"+
+						" Throughput\n"+
+						"   Ops/s   : Overall: %.0f  |  GET: %.0f/s  |  SET: %.0f/s\n"+
 						"\n"+
-						"Latency\n"+
-						"  GET     : p50 %.2f ms | p99 %.2f ms\n"+
-						"  SET     : p50 %.2f ms | p99 %.2f ms\n"+
+						" Latency\n"+
+						"    GET     : p50 %.2f ms | p99 %.2f ms\n"+
+						"    SET     : p50 %.2f ms | p99 %.2f ms\n"+
 						"\n"+
-						"System\n"+
-						"  Memory  : %.1fGB / %.1fGB\n"+
-						"  CPU     : %.0f%%\n"+
-						"  ProcMem : %.1fGB\n"+
-						"  Network : Rx %.1f MB/s | Tx %.1f MB/s\n"+
-						"  TotalOutBoundConn : %d",
+						" System\n"+
+						"   Memory  : %.1fGB / %.1fGB\n"+
+						"   CPU     : %.0f%%\n"+
+						"   ProcMem : %.1fGB\n"+
+						"   Network : Rx %.1f MB/s | Tx %.1f MB/s\n"+
+						"   TotalOutBoundConn : %d\n",
 					progressBar,
 					clientCount,
 					currentTotalQPS, currentWindowGetOps, currentWindowSetOps,
@@ -1861,7 +1867,7 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 
 // createStaticProgressBar creates a progress bar for static workload
 func createStaticProgressBar(elapsed, total time.Duration) string {
-	barWidth := 10
+	barWidth := 20
 	progress := float64(elapsed) / float64(total)
 	if progress > 1.0 {
 		progress = 1.0
