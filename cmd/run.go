@@ -1672,7 +1672,7 @@ func reportProgress(ctx context.Context, stats *WorkloadStats, verbose bool) {
 						"  CPU     : %.0f%%\n"+
 						"  ProcMem : %.1fGB\n"+
 						"  Network : Rx %.1f MB/s | Tx %.1f MB/s\n"+
-						"  TotalOutBoundConn : %d",
+						"  TotalOutBoundConn : %d\n",
 					progressBar,
 					currentClients,
 					currentTotalQPS, currentWindowGetOps, currentWindowSetOps,
@@ -1832,21 +1832,21 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 
 				progressLine := fmt.Sprintf(
 					"\n%s\n"+
-						"Clients : %d\n"+
+						" Established Clients : %d\n"+
 						"\n"+
-						"Throughput\n"+
-						"  Ops/s   : Overall: %.0f  |  GET: %.0f/s  |  SET: %.0f/s\n"+
+						" Throughput\n"+
+						"   Ops/s   : Overall: %.0f  |  GET: %.0f/s  |  SET: %.0f/s\n"+
 						"\n"+
-						"Latency\n"+
-						"  GET     : p50 %.2f ms | p99 %.2f ms\n"+
-						"  SET     : p50 %.2f ms | p99 %.2f ms\n"+
+						" Latency\n"+
+						"    GET     : p50 %.2f ms | p99 %.2f ms\n"+
+						"    SET     : p50 %.2f ms | p99 %.2f ms\n"+
 						"\n"+
-						"System\n"+
-						"  Memory  : %.1fGB / %.1fGB\n"+
-						"  CPU     : %.0f%%\n"+
-						"  ProcMem : %.1fGB\n"+
-						"  Network : Rx %.1f MB/s | Tx %.1f MB/s\n"+
-						"  TotalOutBoundConn : %d",
+						" System\n"+
+						"   Memory  : %.1fGB / %.1fGB\n"+
+						"   CPU     : %.0f%%\n"+
+						"   ProcMem : %.1fGB\n"+
+						"   Network : Rx %.1f MB/s | Tx %.1f MB/s\n"+
+						"   TotalOutBoundConn : %d\n",
 					progressBar,
 					clientCount,
 					currentTotalQPS, currentWindowGetOps, currentWindowSetOps,
