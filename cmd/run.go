@@ -1737,15 +1737,8 @@ func createProgressBar(elapsed time.Duration, stats *WorkloadStats) string {
 	return fmt.Sprintf("%s %s", bar, timeStr)
 }
 
-// getCurrentClientCount returns the current number of active clients
+// getCurrentClientCount returns the current number of active, established clients
 func getCurrentClientCount(stats *WorkloadStats) int {
-	// stats.BlockMutex.RLock()
-	// defer stats.BlockMutex.RUnlock()
-
-	// if stats.CurrentBlock != nil {
-	// 	return stats.CurrentBlock.Config.Clients
-	// }
-	// return 0
 	return int(stats.EstablishedClientCount.Load())
 }
 
