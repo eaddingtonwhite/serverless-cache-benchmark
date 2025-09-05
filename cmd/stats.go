@@ -137,9 +137,8 @@ func (ps *PerformanceStats) GetStats() (int64, int64, int64, float64, int64, int
 	return total, success, failed, qps, p50, p95, p99
 }
 
-// GetCurrentSecondStats returns stats for the current second
-// Note: This may return slightly stale data since we're not using locks,
-// but this is acceptable for monitoring purposes and eliminates contention
+// GetCurrentSecondStats returns stats for the previous second. We want to return previous second vs current since
+// current second window can still be filling up and have stale/incomplete data since were not using locks.
 func (ps *PerformanceStats) GetCurrentSecondStats() (int64, int64, int64, int64, int64) {
 	histToUse := ps.secondHistograms[ps.currentSecond-1]
 	if histToUse == nil || histToUse.TotalCount() == 0 {

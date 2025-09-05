@@ -102,35 +102,36 @@ type CSVLogger struct {
 
 // MetricsSnapshot represents a point-in-time snapshot of metrics
 type MetricsSnapshot struct {
-	Timestamp       time.Time
-	ElapsedSeconds  int
-	TargetClients   int
-	ActualClients   int
-	TargetQPS       int
-	ActualTotalQPS  float64
-	ActualGetQPS    float64
-	ActualSetQPS    float64
-	TotalOps        int64
-	GetOps          int64
-	SetOps          int64
-	GetErrors       int64
-	SetErrors       int64
-	GetLatencyP50   int64
-	GetLatencyP95   int64
-	GetLatencyP99   int64
-	GetLatencyMax   int64
-	SetLatencyP50   int64
-	SetLatencyP95   int64
-	SetLatencyP99   int64
-	SetLatencyMax   int64
-	NetworkRxMBps   float64
-	NetworkTxMBps   float64
-	NetworkRxPPS    float64
-	NetworkTxPPS    float64
-	MemoryUsedGB    float64
-	MemoryTotalGB   float64
-	CPUPercent      float64
-	ProcessMemoryGB float64
+	Timestamp         time.Time
+	ElapsedSeconds    int
+	TargetClients     int
+	ActualClients     int
+	TargetQPS         int
+	ActualTotalQPS    float64
+	ActualGetQPS      float64
+	ActualSetQPS      float64
+	TotalOps          int64
+	GetOps            int64
+	SetOps            int64
+	GetErrors         int64
+	SetErrors         int64
+	GetLatencyP50     int64
+	GetLatencyP95     int64
+	GetLatencyP99     int64
+	GetLatencyMax     int64
+	SetLatencyP50     int64
+	SetLatencyP95     int64
+	SetLatencyP99     int64
+	SetLatencyMax     int64
+	NetworkRxMBps     float64
+	NetworkTxMBps     float64
+	NetworkRxPPS      float64
+	NetworkTxPPS      float64
+	MemoryUsedGB      float64
+	MemoryTotalGB     float64
+	CPUPercent        float64
+	ProcessMemoryGB   float64
+	TotalOutBoundConn int
 }
 
 // WorkloadStats tracks workload performance metrics
@@ -179,6 +180,7 @@ func NewCSVLogger(filename string) (*CSVLogger, error) {
 		"set_latency_p50_us", "set_latency_p95_us", "set_latency_p99_us", "set_latency_max_us",
 		"network_rx_mbps", "network_tx_mbps", "network_rx_pps", "network_tx_pps",
 		"memory_used_gb", "memory_total_gb", "cpu_percent", "process_memory_gb",
+		"total_out_bound_conn",
 	}
 
 	if err := writer.Write(header); err != nil {
@@ -230,6 +232,7 @@ func (cl *CSVLogger) LogMetrics(snapshot MetricsSnapshot) error {
 		fmt.Sprintf("%.2f", snapshot.MemoryTotalGB),
 		fmt.Sprintf("%.1f", snapshot.CPUPercent),
 		fmt.Sprintf("%.3f", snapshot.ProcessMemoryGB),
+		fmt.Sprintf("%d", snapshot.TotalOutBoundConn),
 	}
 
 	if err := cl.writer.Write(record); err != nil {
@@ -1563,10 +1566,6 @@ func reportProgress(ctx context.Context, stats *WorkloadStats, verbose bool) {
 			elapsed := time.Since(startTime)
 
 			if totalOps > 0 {
-				getQPS := float64(getOps) / elapsed.Seconds()
-				setQPS := float64(setOps) / elapsed.Seconds()
-				totalQPS := getQPS + setQPS
-
 				// Create progress bar
 				progressBar := createProgressBar(elapsed, stats)
 
@@ -1574,9 +1573,14 @@ func reportProgress(ctx context.Context, stats *WorkloadStats, verbose bool) {
 				currentClients := getCurrentClientCount(stats)
 				targetClients, targetQPS := getCurrentTargetInfo(stats)
 
-				// Collect latency metrics
-				_, _, _, _, getP50, getP95, getP99 := stats.GetStats.GetStats()
-				_, _, _, _, setP50, setP95, setP99 := stats.SetStats.GetStats()
+				// Get current second stats for progress bar display
+				getCurrentOps, getP50, getP95, getP99, getMax := stats.GetStats.GetCurrentSecondStats()
+				setCurrentOps, setP50, setP95, setP99, setMax := stats.SetStats.GetCurrentSecondStats()
+
+				// Calculate current second QPS (operations in current second)
+				currentGetQPS := float64(getCurrentOps)
+				currentSetQPS := float64(setCurrentOps)
+				currentTotalQPS := currentGetQPS + currentSetQPS
 
 				// Get system resource usage
 				sysStats := getSystemStats()
@@ -1585,44 +1589,69 @@ func reportProgress(ctx context.Context, stats *WorkloadStats, verbose bool) {
 				// Create metrics snapshot and log to CSV
 				if stats.CSVLogger != nil {
 					snapshot := MetricsSnapshot{
-						Timestamp:       time.Now(),
-						ElapsedSeconds:  int(elapsed.Seconds()),
-						TargetClients:   targetClients,
-						ActualClients:   currentClients,
-						TargetQPS:       targetQPS,
-						ActualTotalQPS:  totalQPS,
-						ActualGetQPS:    getQPS,
-						ActualSetQPS:    setQPS,
-						TotalOps:        totalOps,
-						GetOps:          getOps,
-						SetOps:          setOps,
-						GetErrors:       getErrors,
-						SetErrors:       setErrors,
-						GetLatencyP50:   getP50,
-						GetLatencyP95:   getP95,
-						GetLatencyP99:   getP99,
-						GetLatencyMax:   stats.GetStats.Histogram.Max(),
-						SetLatencyP50:   setP50,
-						SetLatencyP95:   setP95,
-						SetLatencyP99:   setP99,
-						SetLatencyMax:   stats.SetStats.Histogram.Max(),
-						NetworkRxMBps:   sysStats.NetworkRxMBps,
-						NetworkTxMBps:   sysStats.NetworkTxMBps,
-						NetworkRxPPS:    sysStats.NetworkRxPPS,
-						NetworkTxPPS:    sysStats.NetworkTxPPS,
-						MemoryUsedGB:    sysStats.MemoryUsedMB / 1024,
-						MemoryTotalGB:   sysStats.MemoryTotalMB / 1024,
-						CPUPercent:      sysStats.CPUPercent,
-						ProcessMemoryGB: procMemMB / 1024,
+						Timestamp:         time.Now(),
+						ElapsedSeconds:    int(elapsed.Seconds()),
+						TargetClients:     targetClients,
+						ActualClients:     currentClients,
+						TargetQPS:         targetQPS,
+						ActualTotalQPS:    currentTotalQPS,
+						ActualGetQPS:      currentGetQPS,
+						ActualSetQPS:      currentSetQPS,
+						TotalOps:          totalOps,
+						GetOps:            getOps,
+						SetOps:            setOps,
+						GetErrors:         getErrors,
+						SetErrors:         setErrors,
+						GetLatencyP50:     getP50,
+						GetLatencyP95:     getP95,
+						GetLatencyP99:     getP99,
+						GetLatencyMax:     getMax,
+						SetLatencyP50:     setP50,
+						SetLatencyP95:     setP95,
+						SetLatencyP99:     setP99,
+						SetLatencyMax:     setMax,
+						NetworkRxMBps:     sysStats.NetworkRxMBps,
+						NetworkTxMBps:     sysStats.NetworkTxMBps,
+						NetworkRxPPS:      sysStats.NetworkRxPPS,
+						NetworkTxPPS:      sysStats.NetworkTxPPS,
+						MemoryUsedGB:      sysStats.MemoryUsedMB / 1024,
+						MemoryTotalGB:     sysStats.MemoryTotalMB / 1024,
+						CPUPercent:        sysStats.CPUPercent,
+						ProcessMemoryGB:   procMemMB / 1024,
+						TotalOutBoundConn: sysStats.OutboundTCPConns,
 					}
 					stats.CSVLogger.LogMetrics(snapshot)
 				}
 
 				// Format the progress line with resource monitoring
-				progressLine := fmt.Sprintf("\r%s | %d clients | %.0f ops/s | GET: %.0f/s | SET: %.0f/s | Mem: %.1fGB/%.1fGB | CPU: %.0f%% | Proc: %.1fGB | Net: %.1f/%.1f MB/s",
-					progressBar, currentClients, totalQPS, getQPS, setQPS,
+				progressLine := fmt.Sprintf(
+					"\n%s\n"+
+						"Clients : %d\n"+
+						"\n"+
+						"Throughput\n"+
+						"  Ops/s   : Overall: %.0f  |  GET: %.0f/s  |  SET: %.0f/s\n"+
+						"\n"+
+						"Latency\n"+
+						"  GET     : p50 %.2f ms | p99 %.2f ms\n"+
+						"  SET     : p50 %.2f ms | p99 %.2f ms\n"+
+						"\n"+
+						"System\n"+
+						"  Memory  : %.1fGB / %.1fGB\n"+
+						"  CPU     : %.0f%%\n"+
+						"  ProcMem : %.1fGB\n"+
+						"  Network : Rx %.1f MB/s | Tx %.1f MB/s\n"+
+						"  TotalOutBoundConn : %d",
+					progressBar,
+					currentClients,
+					currentTotalQPS, currentGetQPS, currentSetQPS,
+					float64(getP50)/1000.0, float64(getP99)/1000.0,
+					float64(setP50)/1000.0, float64(setP99)/1000.0,
 					sysStats.MemoryUsedMB/1024, sysStats.MemoryTotalMB/1024,
-					sysStats.CPUPercent, procMemMB/1024, sysStats.NetworkRxMBps, sysStats.NetworkTxMBps)
+					sysStats.CPUPercent,
+					procMemMB/1024,
+					sysStats.NetworkRxMBps, sysStats.NetworkTxMBps,
+					sysStats.OutboundTCPConns,
+				)
 
 				// Truncate if too long for terminal
 				if len(progressLine) > 150 {
@@ -1722,12 +1751,10 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 			elapsed := time.Since(startTime)
 
 			if totalOps > 0 {
-				// Calculate cumulative QPS for CSV logging
-
 				// Get current second stats for progress bar display
 				getCurrentOps, getP50, getP95, getP99, getMax := stats.GetStats.GetCurrentSecondStats()
 				setCurrentOps, setP50, setP95, setP99, setMax := stats.SetStats.GetCurrentSecondStats()
-				stats.SetStats.GetCurrentSecondStats()
+
 				// Calculate current second QPS (operations in current second)
 				currentGetQPS := float64(getCurrentOps)
 				currentSetQPS := float64(setCurrentOps)
@@ -1743,35 +1770,36 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 				// Create metrics snapshot and log to CSV
 				if stats.CSVLogger != nil {
 					snapshot := MetricsSnapshot{
-						Timestamp:       time.Now(),
-						ElapsedSeconds:  int(elapsed.Seconds()),
-						TargetClients:   clientCount,
-						ActualClients:   clientCount,
-						TargetQPS:       -1, // Static workload doesn't have target QPS
-						ActualTotalQPS:  currentTotalQPS,
-						ActualGetQPS:    currentGetQPS,
-						ActualSetQPS:    currentSetQPS,
-						TotalOps:        totalOps,
-						GetOps:          getOps,
-						SetOps:          setOps,
-						GetErrors:       getErrors,
-						SetErrors:       setErrors,
-						GetLatencyP50:   getP50,
-						GetLatencyP95:   getP95,
-						GetLatencyP99:   getP99,
-						GetLatencyMax:   getMax,
-						SetLatencyP50:   setP50,
-						SetLatencyP95:   setP95,
-						SetLatencyP99:   setP99,
-						SetLatencyMax:   setMax,
-						NetworkRxMBps:   sysStats.NetworkRxMBps,
-						NetworkTxMBps:   sysStats.NetworkTxMBps,
-						NetworkRxPPS:    sysStats.NetworkRxPPS,
-						NetworkTxPPS:    sysStats.NetworkTxPPS,
-						MemoryUsedGB:    sysStats.MemoryUsedMB / 1024,
-						MemoryTotalGB:   sysStats.MemoryTotalMB / 1024,
-						CPUPercent:      sysStats.CPUPercent,
-						ProcessMemoryGB: procMemMB / 1024,
+						Timestamp:         time.Now(),
+						ElapsedSeconds:    int(elapsed.Seconds()),
+						TargetClients:     clientCount,
+						ActualClients:     clientCount,
+						TargetQPS:         -1, // Static workload doesn't have target QPS
+						ActualTotalQPS:    currentTotalQPS,
+						ActualGetQPS:      currentGetQPS,
+						ActualSetQPS:      currentSetQPS,
+						TotalOps:          totalOps,
+						GetOps:            getOps,
+						SetOps:            setOps,
+						GetErrors:         getErrors,
+						SetErrors:         setErrors,
+						GetLatencyP50:     getP50,
+						GetLatencyP95:     getP95,
+						GetLatencyP99:     getP99,
+						GetLatencyMax:     getMax,
+						SetLatencyP50:     setP50,
+						SetLatencyP95:     setP95,
+						SetLatencyP99:     setP99,
+						SetLatencyMax:     setMax,
+						NetworkRxMBps:     sysStats.NetworkRxMBps,
+						NetworkTxMBps:     sysStats.NetworkTxMBps,
+						NetworkRxPPS:      sysStats.NetworkRxPPS,
+						NetworkTxPPS:      sysStats.NetworkTxPPS,
+						MemoryUsedGB:      sysStats.MemoryUsedMB / 1024,
+						MemoryTotalGB:     sysStats.MemoryTotalMB / 1024,
+						CPUPercent:        sysStats.CPUPercent,
+						ProcessMemoryGB:   procMemMB / 1024,
+						TotalOutBoundConn: sysStats.OutboundTCPConns,
 					}
 					stats.CSVLogger.LogMetrics(snapshot)
 				}
