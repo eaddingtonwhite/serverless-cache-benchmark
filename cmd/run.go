@@ -678,11 +678,11 @@ func parseTrafficPattern(filename string) ([]TrafficConfig, error) {
 }
 
 // createAndTestCacheClient creates a cache client and measures setup time including ping
-func createAndTestCacheClient(cacheType string, cmd *cobra.Command, stats *WorkloadStats) (CacheClient, error) {
+func createAndTestCacheClient(ctx context.Context, cacheType string, cmd *cobra.Command, stats *WorkloadStats) (CacheClient, error) {
 	setupStart := time.Now()
 
 	// Create the client
-	client, err := createCacheClientForRun(cacheType, cmd)
+	client, err := createCacheClientForRun(ctx, cacheType, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -705,7 +705,7 @@ func createAndTestCacheClient(cacheType string, cmd *cobra.Command, stats *Workl
 }
 
 // createCacheClientForRun creates a cache client for the run command (reuses populate logic)
-func createCacheClientForRun(cacheType string, cmd *cobra.Command) (CacheClient, error) {
+func createCacheClientForRun(ctx context.Context, cacheType string, cmd *cobra.Command) (CacheClient, error) {
 	switch cacheType {
 	case "redis":
 		uri, _ := cmd.Flags().GetString("redis-uri")
@@ -746,7 +746,7 @@ func createCacheClientForRun(cacheType string, cmd *cobra.Command) (CacheClient,
 		clientConnCount, _ := cmd.Flags().GetUint32("momento-client-conn-count")
 
 		// Don't create cache per worker - it should be created once upfront
-		client, err := NewMomentoClient(apiKey, cacheName, false, defaultTTL, clientConnCount)
+		client, err := NewMomentoClient(ctx, apiKey, cacheName, false, defaultTTL, clientConnCount)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Momento client: %w", err)
 		}
@@ -944,7 +944,7 @@ func runWorkload(cmd *cobra.Command, args []string) {
 
 		if createCache {
 			// Create a temporary client just to create the cache
-			tempClient, err := NewMomentoClient(apiKey, cacheName, true, defaultTTL, clientConnCount)
+			tempClient, err := NewMomentoClient(context.Background(), apiKey, cacheName, true, defaultTTL, clientConnCount)
 			if err != nil {
 				log.Fatalf("Failed to create Momento cache: %v", err)
 			}
@@ -1408,9 +1408,9 @@ func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, wo
 	var err error
 
 	if measureSetup {
-		client, err = createAndTestCacheClient(cacheType, cmd, stats)
+		client, err = createAndTestCacheClient(ctx, cacheType, cmd, stats)
 	} else {
-		client, err = createCacheClientForRun(cacheType, cmd)
+		client, err = createCacheClientForRun(ctx, cacheType, cmd)
 	}
 
 	if err != nil {
@@ -1442,7 +1442,7 @@ func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGr
 
 	// No need for measureSetup ping, just create the cache client as
 	// eager connection already occurs under the hood.
-	client, err := createCacheClientForRun(cacheType, cmd)
+	client, err := createCacheClientForRun(ctx, cacheType, cmd)
 	if err != nil {
 		// Always log connection failures as they're critical
 		log.Printf("Worker %d: Failed to create client: %v", workerID, err)
@@ -2080,7 +2080,7 @@ func runConnectionSetupBenchmark(cmd *cobra.Command, args []string) {
 
 			// Measure connection setup time (create + ping)
 			connStart := time.Now()
-			client, err := createCacheClientForRun(cacheType, cmd)
+			client, err := createCacheClientForRun(ctx, cacheType, cmd)
 			if err != nil {
 				atomic.AddInt64(&failureCount, 1)
 				if verbose {
