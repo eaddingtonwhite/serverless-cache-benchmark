@@ -1973,11 +1973,15 @@ func printFinalResults(stats *WorkloadStats, testTime int, measureSetup bool) {
 	if getOps > 0 {
 		getQPS := float64(getOps) / float64(testTime)
 		_, _, _, _, getP50, getP95, getP99 := stats.GetStats.GetStats()
+		getDroppedLatency, getDroppedErrors := stats.GetStats.GetDroppedEventCounts()
 
 		fmt.Printf("GET Operations: %d\n", getOps)
 		fmt.Printf("AVG GET QPS: %.2f\n", getQPS)
 		fmt.Printf("GET Errors: %d (%.2f%%)\n", getErrors, float64(getErrors)/float64(getOps)*100)
 		fmt.Printf("GET Latency - P50: %d μs, P95: %d μs, P99: %d μs\n", getP50, getP95, getP99)
+		if getDroppedLatency > 0 || getDroppedErrors > 0 {
+			fmt.Printf("GET Dropped Events - Latency: %d, Errors: %d (stats collector bottleneck)\n", getDroppedLatency, getDroppedErrors)
+		}
 		fmt.Println()
 	}
 
@@ -1985,11 +1989,15 @@ func printFinalResults(stats *WorkloadStats, testTime int, measureSetup bool) {
 	if setOps > 0 {
 		setQPS := float64(setOps) / float64(testTime)
 		_, _, _, _, setP50, setP95, setP99 := stats.SetStats.GetStats()
+		setDroppedLatency, setDroppedErrors := stats.SetStats.GetDroppedEventCounts()
 
 		fmt.Printf("SET Operations: %d\n", setOps)
 		fmt.Printf("AVG SET QPS: %.2f\n", setQPS)
 		fmt.Printf("SET Errors: %d (%.2f%%)\n", setErrors, float64(setErrors)/float64(setOps)*100)
 		fmt.Printf("SET Latency - P50: %d μs, P95: %d μs, P99: %d μs\n", setP50, setP95, setP99)
+		if setDroppedLatency > 0 || setDroppedErrors > 0 {
+			fmt.Printf("SET Dropped Events - Latency: %d, Errors: %d (stats collector bottleneck)\n", setDroppedLatency, setDroppedErrors)
+		}
 	}
 
 	fmt.Println(strings.Repeat("=", 60))

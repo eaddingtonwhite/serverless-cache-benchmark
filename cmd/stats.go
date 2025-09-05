@@ -30,6 +30,10 @@ type PerformanceStats struct {
 	currentSecond    int64
 	currentHistogram *hdrhistogram.Histogram
 	secondHistograms map[int64]*hdrhistogram.Histogram
+
+	// Track dropped events (atomic counters for lock-free access)
+	droppedLatencyEvents int64
+	droppedErrorEvents   int64
 }
 
 func NewPerformanceStats() *PerformanceStats {
@@ -98,6 +102,7 @@ func (ps *PerformanceStats) RecordLatency(latencyMicros int64) {
 	default:
 		// Channel is full, drop the event to prevent blocking
 		// This is acceptable for high-throughput scenarios
+		atomic.AddInt64(&ps.droppedLatencyEvents, 1)
 	}
 }
 
@@ -108,6 +113,7 @@ func (ps *PerformanceStats) RecordError() {
 		// Error event sent successfully
 	default:
 		// Channel is full, drop the event to prevent blocking
+		atomic.AddInt64(&ps.droppedErrorEvents, 1)
 	}
 }
 
@@ -135,6 +141,11 @@ func (ps *PerformanceStats) GetStats() (int64, int64, int64, float64, int64, int
 	}
 
 	return total, success, failed, qps, p50, p95, p99
+}
+
+// GetDroppedEventCounts returns the number of dropped latency and error events
+func (ps *PerformanceStats) GetDroppedEventCounts() (int64, int64) {
+	return atomic.LoadInt64(&ps.droppedLatencyEvents), atomic.LoadInt64(&ps.droppedErrorEvents)
 }
 
 // GetCurrentSecondStats returns stats for the current second
