@@ -315,6 +315,44 @@ func (ws *WorkloadStats) RecordOperationInBlock(isSet bool, latencyMicros int64,
 	}
 }
 
+// recordBlockStatOptimized reduces lock contention with backoff retry
+func recordBlockStatOptimized(stats *WorkloadStats, isSet bool, latencyMicros int64, isError bool) {
+	// Try to acquire read lock with brief backoff
+	for attempts := 0; attempts < 3; attempts++ {
+		if stats.BlockMutex.TryRLock() {
+			defer stats.BlockMutex.RUnlock()
+			break
+		}
+		// Brief backoff - only for first 2 attempts
+		if attempts < 2 {
+			time.Sleep(time.Microsecond * 10) // 10 microsecond backoff
+		} else {
+			// After 3 attempts, skip to avoid blocking (rare case)
+			return
+		}
+	}
+
+	if stats.CurrentBlock == nil {
+		return
+	}
+
+	if isSet {
+		if isError {
+			atomic.AddInt64(&stats.CurrentBlock.SetErrors, 1)
+		} else {
+			atomic.AddInt64(&stats.CurrentBlock.ActualSetOps, 1)
+			stats.CurrentBlock.SetStats.RecordLatency(latencyMicros)
+		}
+	} else {
+		if isError {
+			atomic.AddInt64(&stats.CurrentBlock.GetErrors, 1)
+		} else {
+			atomic.AddInt64(&stats.CurrentBlock.ActualGetOps, 1)
+			stats.CurrentBlock.GetStats.RecordLatency(latencyMicros)
+		}
+	}
+}
+
 // runCmd represents the run command
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -1018,21 +1056,6 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 	fmt.Printf("Setting up %d clients...\n", clientCount)
 	setupStart := time.Now()
 
-	// Momento clients will send grpc results to this channel and a single
-	// goroutine will process them and increment stats as needed.
-	var resultChan chan workloadResult
-	var resultWG sync.WaitGroup
-
-	if cacheType == "momento" {
-		resultChan = make(chan workloadResult, clientCount*workerCount*2) // buffer to prevent blocking
-		// Start result processor goroutine
-		resultWG.Add(1)
-		go func() {
-			defer resultWG.Done()
-			processResults(ctx, resultChan, stats, verbose)
-		}()
-	}
-
 	for i := 0; i < clientCount; i++ {
 		// Create rate limiter for this client if specified
 		var limiter *rate.Limiter
@@ -1045,10 +1068,9 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 		// Let each worker create its own connection in parallel
 		switch cacheType {
 		case "momento":
-			// Make sure to pass resultChan to momento workers
 			go runMomentoWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
 				generator, stats, workerCount, setRatio, getRatio, keyPrefix, keyMin, limiter,
-				timeoutSeconds, measureSetup, verbose, quiet, resultChan)
+				timeoutSeconds, measureSetup, verbose, quiet)
 		default:
 			go runWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
 				generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
@@ -1068,11 +1090,6 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 
 	// Wait for all workers to complete
 	wg.Wait()
-
-	if resultChan != nil {
-		resultWG.Wait()
-		close(resultChan)
-	}
 
 	// Clear progress line and print final results
 	fmt.Print("\r" + strings.Repeat(" ", 150) + "\r")
@@ -1248,7 +1265,7 @@ func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 func runMomentoWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
 	setRatio, getRatio int, keyPrefix string, workerCount int, keyMin int,
-	limiter *rate.Limiter, timeoutSeconds int, verbose bool, resultChan chan workloadResult) {
+	limiter *rate.Limiter, timeoutSeconds int, verbose bool) {
 
 	// Create a worker-specific Zipf generator with unique seed to ensure different key patterns
 	seed := time.Now().UnixNano() + int64(workerID*1000)
@@ -1270,17 +1287,18 @@ func runMomentoWorkerInternal(ctx context.Context, workerID int, client CacheCli
 
 	// Use producer-consumer model for continuous request processing
 	runProducerConsumer(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
-		setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, workerCount, &opCount, zipfGen, verbose, limiter, resultChan)
+		setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, workerCount, &opCount, zipfGen, verbose, limiter)
 }
 
 // runProducerConsumer implements producer-consumer model for continuous request processing
 func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
 	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, numConsumers int,
-	opCount *int64, zipfGen *ZipfGenerator, verbose bool, limiter *rate.Limiter, resultChan chan workloadResult) {
+	opCount *int64, zipfGen *ZipfGenerator, verbose bool, limiter *rate.Limiter) {
 
 	// Create channels for producer-consumer communication
-	requestChan := make(chan requestInfo, numConsumers*2) // Buffer to prevent blocking
+	requestChan := make(chan requestInfo, numConsumers*2)   // Buffer to prevent blocking
+	resultChan := make(chan workloadResult, numConsumers*2) // buffer to prevent blocking
 
 	// Start consumer goroutines
 	var consumerWG sync.WaitGroup
@@ -1299,12 +1317,22 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 		}(i)
 	}
 
+	// Start result processor goroutine
+	var resultWG sync.WaitGroup
+	resultWG.Add(1)
+	go func() {
+		defer resultWG.Done()
+		processResults(ctx, resultChan, stats, verbose)
+	}()
+
 	// Producer loop - generate requests continuously
 	for {
 		select {
 		case <-ctx.Done():
 			close(requestChan)
 			consumerWG.Wait()
+			resultWG.Wait()
+			close(resultChan)
 			return
 		default:
 		}
@@ -1315,6 +1343,8 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 			if err != nil {
 				close(requestChan)
 				consumerWG.Wait()
+				resultWG.Wait()
+				close(resultChan)
 				return
 			}
 		}
@@ -1337,6 +1367,8 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 		case <-ctx.Done():
 			close(requestChan)
 			consumerWG.Wait()
+			resultWG.Wait()
+			close(resultChan)
 			return
 		}
 	}
@@ -1410,20 +1442,20 @@ func processResults(ctx context.Context, resultChan <-chan workloadResult, stats
 			if result.isSet {
 				if result.isError {
 					atomic.AddInt64(&stats.SetErrors, 1)
-					stats.RecordOperationInBlock(true, 0, true)
+					recordBlockStatOptimized(stats, true, 0, true)
 				} else {
 					atomic.AddInt64(&stats.SetOps, 1)
 					stats.SetStats.RecordLatency(result.latencyMicros)
-					stats.RecordOperationInBlock(true, result.latencyMicros, false)
+					recordBlockStatOptimized(stats, true, result.latencyMicros, false)
 				}
 			} else {
 				if result.isError {
 					atomic.AddInt64(&stats.GetErrors, 1)
-					stats.RecordOperationInBlock(false, 0, true)
+					recordBlockStatOptimized(stats, false, 0, true)
 				} else {
 					atomic.AddInt64(&stats.GetOps, 1)
 					stats.GetStats.RecordLatency(result.latencyMicros)
-					stats.RecordOperationInBlock(false, result.latencyMicros, false)
+					recordBlockStatOptimized(stats, false, result.latencyMicros, false)
 				}
 			}
 
@@ -1536,7 +1568,7 @@ func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGr
 	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
 	generator *DataGenerator, stats *WorkloadStats, workerCount int, setRatio, getRatio int,
 	keyPrefix string, keyMin int, limiter *rate.Limiter, timeoutSeconds int,
-	measureSetup, verbose, quiet bool, resultChan chan workloadResult) {
+	measureSetup, verbose, quiet bool) {
 
 	defer wg.Done()
 
@@ -1558,7 +1590,7 @@ func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGr
 
 	// Now run the normal worker routine (but don't call wg.Done() again)
 	runMomentoWorkerInternal(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
-		setRatio, getRatio, keyPrefix, workerCount, keyMin, limiter, timeoutSeconds, verbose, resultChan)
+		setRatio, getRatio, keyPrefix, workerCount, keyMin, limiter, timeoutSeconds, verbose)
 }
 
 // manageTrafficPattern manages dynamic client scaling and QPS changes
@@ -1570,29 +1602,6 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 	var activeWorkers []context.CancelFunc
 	var wg sync.WaitGroup
 	startTime := time.Now()
-
-	// Momento clients will send grpc results to this channel and a single
-	// goroutine will process them and increment stats as needed.
-	var resultChan chan workloadResult
-	var resultWG sync.WaitGroup
-
-	if cacheType == "momento" {
-		// Calculate maximum clients needed across all configs
-		maxClients := 0
-		for _, config := range configs {
-			if config.Clients > maxClients {
-				maxClients = config.Clients
-			}
-		}
-
-		resultChan = make(chan workloadResult, maxClients*workerCount*2) // buffer to prevent blocking
-		// Start result processor goroutine
-		resultWG.Add(1)
-		go func() {
-			defer resultWG.Done()
-			processResults(ctx, resultChan, stats, verbose)
-		}()
-	}
 
 	for i, config := range configs {
 		// Wait until it's time for this configuration
@@ -1665,10 +1674,9 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 						generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
 						timeoutSeconds, measureSetup, verbose, quiet)
 				case "momento":
-					// Make sure to pass resultChan to momento workers
 					go runMomentoWorkerWithConnectionCreation(workerCtx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
 						generator, stats, workerCount, setRatio, getRatio, keyPrefix, keyMin, limiter,
-						timeoutSeconds, measureSetup, verbose, quiet, resultChan)
+						timeoutSeconds, measureSetup, verbose, quiet)
 				default:
 					log.Fatalf("Invalid cache type: %s", cacheType)
 				}
@@ -1687,11 +1695,6 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 
 	// Wait for all workers to finish
 	wg.Wait()
-
-	if resultChan != nil {
-		resultWG.Wait()
-		close(resultChan)
-	}
 }
 
 // reportProgress reports workload progress with a progress bar
