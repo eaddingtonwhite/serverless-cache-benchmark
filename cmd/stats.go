@@ -141,15 +141,16 @@ func (ps *PerformanceStats) GetStats() (int64, int64, int64, float64, int64, int
 // Note: This may return slightly stale data since we're not using locks,
 // but this is acceptable for monitoring purposes and eliminates contention
 func (ps *PerformanceStats) GetCurrentSecondStats() (int64, int64, int64, int64, int64) {
-	if ps.currentHistogram == nil || ps.currentHistogram.TotalCount() == 0 {
+	histToUse := ps.secondHistograms[ps.currentSecond-1]
+	if histToUse == nil || histToUse.TotalCount() == 0 {
 		return 0, 0, 0, 0, 0
 	}
 
-	return ps.currentHistogram.TotalCount(),
-		ps.currentHistogram.ValueAtQuantile(50),
-		ps.currentHistogram.ValueAtQuantile(95),
-		ps.currentHistogram.ValueAtQuantile(99),
-		ps.currentHistogram.Max()
+	return histToUse.TotalCount(),
+		histToUse.ValueAtQuantile(50),
+		histToUse.ValueAtQuantile(95),
+		histToUse.ValueAtQuantile(99),
+		histToUse.Max()
 }
 
 // GetOverallStats returns overall statistics
