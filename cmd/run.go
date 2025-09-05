@@ -684,17 +684,18 @@ func createAndTestCacheClient(cacheType string, cmd *cobra.Command, stats *Workl
 		return nil, err
 	}
 
-	// Test connectivity with ping
-	// PING Already happens under hood when establishing client dont need to do a second time
-	//ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	//defer cancel()
-	//
-	//err = client.Ping(ctx)
-	//if err != nil {
-	//	client.Close()
-	//	return nil, fmt.Errorf("ping failed: %w", err)
-	//}
-	//
+	// Test connectivity with ping (skip for Momento as it happens during client creation)
+	if cacheType != "momento" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		err = client.Ping(ctx)
+		if err != nil {
+			client.Close()
+			return nil, fmt.Errorf("ping failed: %w", err)
+		}
+	}
+
 	// Record setup time
 	setupTime := time.Since(setupStart)
 	stats.SetupStats.RecordLatency(setupTime.Microseconds())
@@ -1010,6 +1011,57 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 		cancel() // Cancel context to stop all workers
 	}()
 
+	// Create global results channel and consumer goroutine for Momento clients
+	var resultsChan chan batchResult
+	var resultsWg sync.WaitGroup
+
+	if cacheType == "momento" {
+		resultsChan = make(chan batchResult, clientCount*1000) // Buffer for better performance
+
+		// Start multiple consumer goroutines to process results in parallel
+		numConsumers := 8
+		if verbose {
+			fmt.Printf("Starting %d consumer goroutines for result processing\n", numConsumers)
+		}
+
+		for i := 0; i < numConsumers; i++ {
+			resultsWg.Add(1)
+			go func(consumerID int) {
+				defer resultsWg.Done()
+				for {
+					select {
+					case result, ok := <-resultsChan:
+						if !ok {
+							return // Channel closed, exit
+						}
+						// Process result and update stats
+						if result.isSet {
+							if result.isError {
+								atomic.AddInt64(&stats.SetErrors, 1)
+								stats.RecordOperationInBlock(true, 0, true)
+							} else {
+								atomic.AddInt64(&stats.SetOps, 1)
+								stats.SetStats.RecordLatency(result.latencyMicros)
+								stats.RecordOperationInBlock(true, result.latencyMicros, false)
+							}
+						} else {
+							if result.isError {
+								atomic.AddInt64(&stats.GetErrors, 1)
+								stats.RecordOperationInBlock(false, 0, true)
+							} else {
+								atomic.AddInt64(&stats.GetOps, 1)
+								stats.GetStats.RecordLatency(result.latencyMicros)
+								stats.RecordOperationInBlock(false, result.latencyMicros, false)
+							}
+						}
+					case <-ctx.Done():
+						return // Context cancelled, exit
+					}
+				}
+			}(i)
+		}
+	}
+
 	// Create workers
 	var wg sync.WaitGroup
 
@@ -1030,7 +1082,7 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 		case "momento":
 			go runMomentoWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
 				generator, stats, batchSize, setRatio, getRatio, keyPrefix, keyMin, limiter,
-				timeoutSeconds, measureSetup, verbose, quiet)
+				timeoutSeconds, measureSetup, verbose, quiet, resultsChan)
 		default:
 			go runWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
 				generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
@@ -1050,6 +1102,12 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 
 	// Wait for all workers to complete
 	wg.Wait()
+
+	// Close results channel and wait for consumer
+	if resultsChan != nil {
+		close(resultsChan)
+		resultsWg.Wait()
+	}
 
 	// Clear progress line and print final results
 	fmt.Print("\r" + strings.Repeat(" ", 150) + "\r")
@@ -1225,7 +1283,7 @@ func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 func runMomentoWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
 	setRatio, getRatio int, keyPrefix string, batchSize int, keyMin int,
-	limiter *rate.Limiter, timeoutSeconds int, verbose bool) {
+	limiter *rate.Limiter, timeoutSeconds int, verbose bool, resultsChan chan batchResult) {
 
 	// Create a worker-specific Zipf generator with unique seed to ensure different key patterns
 	seed := time.Now().UnixNano() + int64(workerID*1000)
@@ -1260,9 +1318,45 @@ func runMomentoWorkerInternal(ctx context.Context, workerID int, client CacheCli
 			}
 		}
 
-		runBatch(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
-			setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, batchSize, &opCount, zipfGen, verbose)
+		runMomentoBatch(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
+			setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, batchSize, &opCount, zipfGen, verbose, resultsChan)
 	}
+}
+
+// runMomentoBatch processes a batch of requests concurrently and sends results directly to the global channel
+func runMomentoBatch(ctx context.Context, workerID int, client CacheClient,
+	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
+	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, batchSize int,
+	opCount *int64, zipfGen *ZipfGenerator, verbose bool, resultsChan chan batchResult) {
+
+	var wg sync.WaitGroup
+
+	// Start batchSize goroutines to process requests concurrently
+	for i := 0; i < batchSize; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result := processSingleRequest(ctx, workerID, client, totalKeys, zipfExp, generator,
+				setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, opCount, zipfGen, verbose)
+
+			// Send result directly to the global results channel (non-blocking)
+			select {
+			case resultsChan <- result:
+				// Successfully sent to global channel
+			case <-ctx.Done():
+				// Context cancelled, stop sending
+				return
+			default:
+				// Channel full, drop result and log warning
+				if verbose {
+					log.Printf("Worker %d: Dropped result - results channel full (consumer can't keep up)", workerID)
+				}
+			}
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
 }
 
 // runBatch processes a batch of requests concurrently
@@ -1415,7 +1509,7 @@ func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGr
 	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
 	generator *DataGenerator, stats *WorkloadStats, batchSize int, setRatio, getRatio int,
 	keyPrefix string, keyMin int, limiter *rate.Limiter, timeoutSeconds int,
-	measureSetup, verbose, quiet bool) {
+	measureSetup, verbose, quiet bool, resultsChan chan batchResult) {
 
 	defer wg.Done()
 
@@ -1441,7 +1535,7 @@ func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGr
 
 	// Now run the normal worker routine (but don't call wg.Done() again)
 	runMomentoWorkerInternal(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
-		setRatio, getRatio, keyPrefix, batchSize, keyMin, limiter, timeoutSeconds, verbose)
+		setRatio, getRatio, keyPrefix, batchSize, keyMin, limiter, timeoutSeconds, verbose, resultsChan)
 }
 
 // manageTrafficPattern manages dynamic client scaling and QPS changes
@@ -2042,25 +2136,26 @@ func runConnectionSetupBenchmark(cmd *cobra.Command, args []string) {
 			}
 			defer client.Close()
 
-			// Test connectivity with ping
-			// PING Already happens under hood when establishing client dont need to do a second time
-			//ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
-			//defer cancel()
-			//
-			//err = client.Ping(ctx)
-			setupTime := time.Since(connStart)
+			// Test connectivity with ping (skip for Momento as it happens during client creation)
+			if cacheType != "momento" {
+				pingCtx, pingCancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+				defer pingCancel()
 
-			if err != nil {
-				atomic.AddInt64(&failureCount, 1)
-				if verbose {
-					log.Printf("Connection %d ping failed: %v", connID, err)
+				err = client.Ping(pingCtx)
+				if err != nil {
+					atomic.AddInt64(&failureCount, 1)
+					if verbose {
+						log.Printf("Connection %d ping failed: %v", connID, err)
+					}
+					return
 				}
-			} else {
-				atomic.AddInt64(&successCount, 1)
-				setupStats.RecordLatency(setupTime.Microseconds())
-				if verbose {
-					log.Printf("Connection %d setup successful in %v", connID, setupTime)
-				}
+			}
+
+			setupTime := time.Since(connStart)
+			atomic.AddInt64(&successCount, 1)
+			setupStats.RecordLatency(setupTime.Microseconds())
+			if verbose {
+				log.Printf("Connection %d setup successful in %v", connID, setupTime)
 			}
 		}(i)
 	}
