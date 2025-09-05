@@ -163,6 +163,20 @@ func (ps *PerformanceStats) GetCurrentSecondStats() (int64, int64, int64, int64,
 		ps.currentHistogram.Max()
 }
 
+// GetPrevSecondStats returns stats for the previous second
+func (ps *PerformanceStats) GetPrevSecondStats() (int64, int64, int64, int64, int64) {
+	prevSecond := ps.currentSecond - 1
+	if ps.currentHistogram == nil || ps.currentHistogram.TotalCount() == 0 || ps.secondHistograms[prevSecond] == nil {
+		return 0, 0, 0, 0, 0
+	}
+
+	return ps.secondHistograms[prevSecond].TotalCount(),
+		ps.secondHistograms[prevSecond].ValueAtQuantile(50),
+		ps.secondHistograms[prevSecond].ValueAtQuantile(95),
+		ps.secondHistograms[prevSecond].ValueAtQuantile(99),
+		ps.secondHistograms[prevSecond].Max()
+}
+
 // GetOverallStats returns overall statistics
 func (ps *PerformanceStats) GetOverallStats() (int64, int64, int64, float64) {
 	total := atomic.LoadInt64(&ps.TotalOps)
