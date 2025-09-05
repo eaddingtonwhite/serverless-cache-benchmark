@@ -19,7 +19,7 @@ type MomentoClient struct {
 	cacheName string
 }
 
-func NewMomentoClient(apiKey, cacheName string, createCache bool, defaultTTLSeconds int, clientConnectCount uint32) (*MomentoClient, error) {
+func NewMomentoClient(ctx context.Context, apiKey, cacheName string, createCache bool, defaultTTLSeconds int, clientConnectCount uint32) (*MomentoClient, error) {
 	var credential auth.CredentialProvider
 	var err error
 	loggerFactory := momento_default_logger.NewDefaultMomentoLoggerFactory(momento_default_logger.WARN)
@@ -49,13 +49,18 @@ func NewMomentoClient(apiKey, cacheName string, createCache bool, defaultTTLSeco
 	// wait 1 second between retries to create the client (in case of network issues)
 	var client momento.CacheClient
 	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 		client, err = momento.NewCacheClient(
 			config.LaptopLatestWithLogger(loggerFactory).WithNumGrpcChannels(clientConnectCount),
 			credential,
 			defaultTTL,
 		)
 		if err != nil {
-			log.Printf("failed to create Momento client: %w, retrying...", err)
+			log.Printf("failed to create Momento client: %s, retrying...", err.Error())
 			time.Sleep(time.Second * 1)
 		} else {
 			break

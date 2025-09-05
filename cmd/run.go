@@ -678,26 +678,25 @@ func parseTrafficPattern(filename string) ([]TrafficConfig, error) {
 }
 
 // createAndTestCacheClient creates a cache client and measures setup time including ping
-func createAndTestCacheClient(cacheType string, cmd *cobra.Command, stats *WorkloadStats) (CacheClient, error) {
+func createAndTestCacheClient(ctx context.Context, cacheType string, cmd *cobra.Command, stats *WorkloadStats) (CacheClient, error) {
 	setupStart := time.Now()
 
 	// Create the client
-	client, err := createCacheClientForRun(cacheType, cmd)
+	client, err := createCacheClientForRun(ctx, cacheType, cmd)
 	if err != nil {
 		return nil, err
 	}
 
 	// Test connectivity with ping
-	// PING Already happens under hood when establishing client dont need to do a second time
-	//ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	//defer cancel()
-	//
-	//err = client.Ping(ctx)
-	//if err != nil {
-	//	client.Close()
-	//	return nil, fmt.Errorf("ping failed: %w", err)
-	//}
-	//
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = client.Ping(ctx)
+	if err != nil {
+		client.Close()
+		return nil, fmt.Errorf("ping failed: %w", err)
+	}
+
 	// Record setup time
 	setupTime := time.Since(setupStart)
 	stats.SetupStats.RecordLatency(setupTime.Microseconds())
@@ -706,7 +705,7 @@ func createAndTestCacheClient(cacheType string, cmd *cobra.Command, stats *Workl
 }
 
 // createCacheClientForRun creates a cache client for the run command (reuses populate logic)
-func createCacheClientForRun(cacheType string, cmd *cobra.Command) (CacheClient, error) {
+func createCacheClientForRun(ctx context.Context, cacheType string, cmd *cobra.Command) (CacheClient, error) {
 	switch cacheType {
 	case "redis":
 		uri, _ := cmd.Flags().GetString("redis-uri")
@@ -747,7 +746,7 @@ func createCacheClientForRun(cacheType string, cmd *cobra.Command) (CacheClient,
 		clientConnCount, _ := cmd.Flags().GetUint32("momento-client-conn-count")
 
 		// Don't create cache per worker - it should be created once upfront
-		client, err := NewMomentoClient(apiKey, cacheName, false, defaultTTL, clientConnCount)
+		client, err := NewMomentoClient(ctx, apiKey, cacheName, false, defaultTTL, clientConnCount)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Momento client: %w", err)
 		}
@@ -934,7 +933,7 @@ func runWorkload(cmd *cobra.Command, args []string) {
 
 	fmt.Printf("Logging metrics to: %s\n", csvOutput)
 
-	batchSize, _ := cmd.Flags().GetInt("momento-client-worker-batch-size")
+	workerCount, _ := cmd.Flags().GetInt("momento-client-worker-count")
 
 	// For Momento, create cache once upfront to avoid spam
 	if cacheType == "momento" {
@@ -945,7 +944,7 @@ func runWorkload(cmd *cobra.Command, args []string) {
 
 		if createCache {
 			// Create a temporary client just to create the cache
-			tempClient, err := NewMomentoClient(apiKey, cacheName, true, defaultTTL, clientConnCount)
+			tempClient, err := NewMomentoClient(context.Background(), apiKey, cacheName, true, defaultTTL, clientConnCount)
 			if err != nil {
 				log.Fatalf("Failed to create Momento cache: %v", err)
 			}
@@ -971,17 +970,17 @@ func runWorkload(cmd *cobra.Command, args []string) {
 	if trafficPatternFile != "" {
 		// Use dynamic traffic pattern
 		runDynamicWorkload(cmd, trafficPatternFile, cacheType, zipfExp, ratioStr, keyPrefix, keyMin,
-			totalKeys, dataSize, randomData, defaultTTL, batchSize, measureSetup, verbose, quiet, timeoutSeconds, stats)
+			totalKeys, dataSize, randomData, defaultTTL, workerCount, measureSetup, verbose, quiet, timeoutSeconds, stats)
 	} else {
 		// Use static configuration - run the original logic
 		runStaticWorkload(cmd, cacheType, clientCount, rps, zipfExp, ratioStr, keyPrefix, keyMin,
-			totalKeys, dataSize, randomData, defaultTTL, batchSize, measureSetup, verbose, quiet, timeoutSeconds, testTime, stats)
+			totalKeys, dataSize, randomData, defaultTTL, workerCount, measureSetup, verbose, quiet, timeoutSeconds, testTime, stats)
 	}
 }
 
 // runStaticWorkload runs the original static workload logic
 func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps int, zipfExp float64,
-	ratioStr, keyPrefix string, keyMin, totalKeys, dataSize int, randomData bool, defaultTTL int, batchSize int, measureSetup, verbose, quiet bool,
+	ratioStr, keyPrefix string, keyMin, totalKeys, dataSize int, randomData bool, defaultTTL int, workerCount int, measureSetup, verbose, quiet bool,
 	timeoutSeconds, testTime int, stats *WorkloadStats) {
 
 	// Parse ratio
@@ -1032,7 +1031,7 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 		switch cacheType {
 		case "momento":
 			go runMomentoWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
-				generator, stats, batchSize, setRatio, getRatio, keyPrefix, keyMin, limiter,
+				generator, stats, workerCount, setRatio, getRatio, keyPrefix, keyMin, limiter,
 				timeoutSeconds, measureSetup, verbose, quiet)
 		default:
 			go runWorkerWithConnectionCreation(ctx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
@@ -1061,7 +1060,7 @@ func runStaticWorkload(cmd *cobra.Command, cacheType string, clientCount, rps in
 
 // runDynamicWorkload runs workload with dynamic traffic patterns
 func runDynamicWorkload(cmd *cobra.Command, trafficPatternFile, cacheType string, zipfExp float64,
-	ratioStr, keyPrefix string, keyMin, totalKeys, dataSize int, randomData bool, defaultTTL int, batchSize int, measureSetup, verbose, quiet bool,
+	ratioStr, keyPrefix string, keyMin, totalKeys, dataSize int, randomData bool, defaultTTL int, workerCount int, measureSetup, verbose, quiet bool,
 	timeoutSeconds int, stats *WorkloadStats) {
 
 	// Parse traffic pattern
@@ -1118,7 +1117,7 @@ func runDynamicWorkload(cmd *cobra.Command, trafficPatternFile, cacheType string
 
 	// Start traffic pattern manager
 	go manageTrafficPattern(ctx, trafficConfigs, cacheType, cmd, generator, stats,
-		setRatio, getRatio, keyPrefix, batchSize, keyMin, totalKeys, zipfExp, measureSetup, verbose, quiet, timeoutSeconds)
+		setRatio, getRatio, keyPrefix, workerCount, keyMin, totalKeys, zipfExp, measureSetup, verbose, quiet, timeoutSeconds)
 
 	// Start progress reporting
 	go reportProgress(ctx, stats, verbose)
@@ -1227,7 +1226,7 @@ func runWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 // runMomentoWorkerInternal contains the actual worker logic without WaitGroup management
 func runMomentoWorkerInternal(ctx context.Context, workerID int, client CacheClient,
 	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
-	setRatio, getRatio int, keyPrefix string, batchSize int, keyMin int,
+	setRatio, getRatio int, keyPrefix string, workerCount int, keyMin int,
 	limiter *rate.Limiter, timeoutSeconds int, verbose bool) {
 
 	// Create a worker-specific Zipf generator with unique seed to ensure different key patterns
@@ -1245,138 +1244,154 @@ func runMomentoWorkerInternal(ctx context.Context, workerID int, client CacheCli
 
 	var opCount int64
 	if verbose {
-		fmt.Printf("Worker %d: Using batching with batch size %d\n", workerID, batchSize)
+		fmt.Printf("Worker %d: Using producer-consumer batching with %d consumers\n", workerID, workerCount)
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
+	// Use producer-consumer model for continuous request processing
+	runProducerConsumer(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
+		setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, workerCount, &opCount, zipfGen, verbose, limiter)
+}
 
+// runProducerConsumer implements producer-consumer model for continuous request processing
+func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
+	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
+	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, numConsumers int,
+	opCount *int64, zipfGen *ZipfGenerator, verbose bool, limiter *rate.Limiter) {
+
+	// Create channels for producer-consumer communication
+	requestChan := make(chan requestInfo, numConsumers*2) // Buffer to prevent blocking
+
+	// Start consumer goroutines
+	var consumerWG sync.WaitGroup
+	for i := 0; i < numConsumers; i++ {
+		consumerWG.Add(1)
+		go func(consumerID int) {
+			defer consumerWG.Done()
+			for request := range requestChan {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					result := processRequest(ctx, request, client, generator, timeoutSeconds, verbose)
+					if result.isSet {
+						if result.isError {
+							atomic.AddInt64(&stats.SetErrors, 1)
+							stats.RecordOperationInBlock(true, 0, true)
+						} else {
+							atomic.AddInt64(&stats.SetOps, 1)
+							stats.SetStats.RecordLatency(result.latencyMicros)
+							stats.RecordOperationInBlock(true, result.latencyMicros, false)
+						}
+					} else {
+						if result.isError {
+							atomic.AddInt64(&stats.GetErrors, 1)
+							stats.RecordOperationInBlock(false, 0, true)
+						} else {
+							atomic.AddInt64(&stats.GetOps, 1)
+							stats.GetStats.RecordLatency(result.latencyMicros)
+							stats.RecordOperationInBlock(false, result.latencyMicros, false)
+						}
+					}
+				}
+			}
+		}(i)
+	}
+
+	// Producer loop - generate requests continuously
+	for {
 		// Apply rate limiting if configured
 		if limiter != nil {
 			err := limiter.Wait(ctx)
 			if err != nil {
+				close(requestChan)
+				consumerWG.Wait()
 				return
 			}
 		}
 
-		runBatch(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
-			setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, batchSize, &opCount, zipfGen, verbose)
-	}
-}
+		// Generate request info
+		*opCount++
+		isSet := (*opCount % int64(setRatio+getRatio)) < int64(setRatio)
+		keyOffset := zipfGen.Next()
+		key := fmt.Sprintf("%s%d", keyPrefix, keyMin+int(keyOffset))
 
-// runBatch processes a batch of requests concurrently
-func runBatch(ctx context.Context, workerID int, client CacheClient,
-	totalKeys int, zipfExp float64, generator *DataGenerator, stats *WorkloadStats,
-	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, batchSize int,
-	opCount *int64, zipfGen *ZipfGenerator, verbose bool) {
+		request := requestInfo{
+			workerID: workerID,
+			isSet:    isSet,
+			key:      key,
+		}
 
-	var wg sync.WaitGroup
-	results := make(chan batchResult, batchSize)
-
-	// Start batchSize goroutines to process requests concurrently
-	for i := 0; i < batchSize; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			result := processSingleRequest(ctx, workerID, client, totalKeys, zipfExp, generator,
-				setRatio, getRatio, keyPrefix, keyMin, timeoutSeconds, opCount, zipfGen, verbose)
-			results <- result
-		}()
-	}
-
-	// Wait for all goroutines to complete
-	wg.Wait()
-	close(results)
-
-	// Process results and update stats
-	for result := range results {
-		if result.isSet {
-			if result.isError {
-				atomic.AddInt64(&stats.SetErrors, 1)
-				stats.RecordOperationInBlock(true, 0, true)
-			} else {
-				atomic.AddInt64(&stats.SetOps, 1)
-				stats.SetStats.RecordLatency(result.latencyMicros)
-				stats.RecordOperationInBlock(true, result.latencyMicros, false)
-			}
-		} else {
-			if result.isError {
-				atomic.AddInt64(&stats.GetErrors, 1)
-				stats.RecordOperationInBlock(false, 0, true)
-			} else {
-				atomic.AddInt64(&stats.GetOps, 1)
-				stats.GetStats.RecordLatency(result.latencyMicros)
-				stats.RecordOperationInBlock(false, result.latencyMicros, false)
-			}
+		// Send request to consumers (blocking if full)
+		select {
+		case requestChan <- request:
+		case <-ctx.Done():
+			close(requestChan)
+			consumerWG.Wait()
+			return
 		}
 	}
 }
 
-// batchResult represents the result of a single request operation
-type batchResult struct {
-	isSet         bool
-	isError       bool
-	latencyMicros int64
+// requestInfo holds information for a single cache operation request
+type requestInfo struct {
+	workerID int
+	isSet    bool
+	key      string
 }
 
-// processSingleRequest processes a single request and returns the result
-func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
-	totalKeys int, zipfExp float64, generator *DataGenerator,
-	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, opCount *int64, zipfGen *ZipfGenerator, verbose bool) batchResult {
-
-	// Determine operation type based on ratio
-	*opCount++
-	isSet := (*opCount % int64(setRatio+getRatio)) < int64(setRatio)
-
-	// Generate key using Zipf distribution
-	keyOffset := zipfGen.Next()
-	key := fmt.Sprintf("%s%d", keyPrefix, keyMin+int(keyOffset))
-
-	// Create operation timeout context
+// processRequest processes a single cache request
+func processRequest(ctx context.Context, request requestInfo, client CacheClient,
+	generator *DataGenerator, timeoutSeconds int, verbose bool) workloadResult {
+	// Create operation timeout context before timing
 	opCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
-	if isSet {
-		// Perform SET operation
+	if request.isSet {
+		// Generate data BEFORE timing the operation
 		data, err := generator.GenerateData()
 		if err != nil {
-			return batchResult{isSet: true, isError: true, latencyMicros: 0}
+			return workloadResult{isSet: true, isError: true, latencyMicros: 0}
 		}
 
 		// Get expiration from generator (uses DefaultTTL if set)
 		expiration := generator.GetExpiration()
 
+		// Time ONLY the cache operation
 		start := time.Now()
-		err = client.Set(opCtx, key, data, expiration)
+		err = client.Set(opCtx, request.key, data, expiration)
 		latency := time.Since(start)
 
 		if err != nil {
 			if verbose {
-				log.Printf("Worker %d: Set operation failed for key %s: %v", workerID, key, err)
+				log.Printf("Worker %d: Set operation failed for key %s: %v", request.workerID, request.key, err)
 			}
-			return batchResult{isSet: true, isError: true, latencyMicros: 0}
+			return workloadResult{isSet: true, isError: true, latencyMicros: 0}
 		} else {
-			return batchResult{isSet: true, isError: false, latencyMicros: latency.Microseconds()}
+			return workloadResult{isSet: true, isError: false, latencyMicros: latency.Microseconds()}
 		}
 	} else {
 		// Perform GET operation
+		// Time ONLY the cache operation
 		start := time.Now()
-		_, err := client.Get(opCtx, key)
+		_, err := client.Get(opCtx, request.key)
 		latency := time.Since(start)
 
 		if err != nil {
 			if verbose {
-				log.Printf("Worker %d: Get operation failed for key %s: %v", workerID, key, err)
+				log.Printf("Worker %d: Get operation failed for key %s: %v", request.workerID, request.key, err)
 			}
-			return batchResult{isSet: false, isError: true, latencyMicros: 0}
+			return workloadResult{isSet: false, isError: true, latencyMicros: 0}
 		} else {
-			return batchResult{isSet: false, isError: false, latencyMicros: latency.Microseconds()}
+			return workloadResult{isSet: false, isError: false, latencyMicros: latency.Microseconds()}
 		}
 	}
+}
+
+// workloadResult represents the result of a single request operation
+type workloadResult struct {
+	isSet         bool
+	isError       bool
+	latencyMicros int64
 }
 
 // runWorkerWithConnectionCreation creates its own connection and then runs the worker
@@ -1393,9 +1408,9 @@ func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, wo
 	var err error
 
 	if measureSetup {
-		client, err = createAndTestCacheClient(cacheType, cmd, stats)
+		client, err = createAndTestCacheClient(ctx, cacheType, cmd, stats)
 	} else {
-		client, err = createCacheClientForRun(cacheType, cmd)
+		client, err = createCacheClientForRun(ctx, cacheType, cmd)
 	}
 
 	if err != nil {
@@ -1403,6 +1418,7 @@ func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, wo
 		log.Printf("Worker %d: Failed to create client: %v", workerID, err)
 		return
 	}
+	defer client.Close()
 
 	if verbose && !quiet {
 		log.Printf("Worker %d: Successfully created client connection", workerID)
@@ -1416,22 +1432,17 @@ func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, wo
 // runMomentoWorkerWithConnectionCreation creates its own connection and then runs the worker
 func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, workerID int,
 	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
-	generator *DataGenerator, stats *WorkloadStats, batchSize int, setRatio, getRatio int,
+	generator *DataGenerator, stats *WorkloadStats, workerCount int, setRatio, getRatio int,
 	keyPrefix string, keyMin int, limiter *rate.Limiter, timeoutSeconds int,
 	measureSetup, verbose, quiet bool) {
 
 	defer wg.Done()
 
 	// Create cache client in this goroutine (parallel connection creation)
-	var client CacheClient
-	var err error
 
-	if measureSetup {
-		client, err = createAndTestCacheClient(cacheType, cmd, stats)
-	} else {
-		client, err = createCacheClientForRun(cacheType, cmd)
-	}
-
+	// No need for measureSetup ping, just create the cache client as
+	// eager connection already occurs under the hood.
+	client, err := createCacheClientForRun(ctx, cacheType, cmd)
 	if err != nil {
 		// Always log connection failures as they're critical
 		log.Printf("Worker %d: Failed to create client: %v", workerID, err)
@@ -1439,18 +1450,19 @@ func runMomentoWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGr
 	}
 
 	if verbose && !quiet {
-		log.Printf("Worker %d: Successfully created client connection", workerID)
+		clientConnCount, _ := cmd.Flags().GetUint32("momento-client-conn-count")
+		log.Printf("Worker %d: Successfully created Momento client with %d TCP connections", workerID, clientConnCount)
 	}
 
 	// Now run the normal worker routine (but don't call wg.Done() again)
 	runMomentoWorkerInternal(ctx, workerID, client, totalKeys, zipfExp, generator, stats,
-		setRatio, getRatio, keyPrefix, batchSize, keyMin, limiter, timeoutSeconds, verbose)
+		setRatio, getRatio, keyPrefix, workerCount, keyMin, limiter, timeoutSeconds, verbose)
 }
 
 // manageTrafficPattern manages dynamic client scaling and QPS changes
 func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheType string,
 	cmd *cobra.Command, generator *DataGenerator, stats *WorkloadStats,
-	setRatio, getRatio int, keyPrefix string, batchSize int, keyMin, totalKeys int, zipfExp float64,
+	setRatio, getRatio int, keyPrefix string, workerCount int, keyMin, totalKeys int, zipfExp float64,
 	measureSetup, verbose, quiet bool, timeoutSeconds int) {
 
 	var activeWorkers []context.CancelFunc
@@ -1521,12 +1533,20 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 				activeWorkers = append(activeWorkers, workerCancel)
 
 				wg.Add(1)
-				// Pass connection creation parameters to worker - let it create connection in parallel
-				go runWorkerWithConnectionCreation(workerCtx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
-					generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
-					timeoutSeconds, measureSetup, verbose, quiet)
+				switch cacheType {
+				case "redis":
+					// Pass connection creation parameters to worker - let it create connection in parallel
+					go runWorkerWithConnectionCreation(workerCtx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
+						generator, stats, setRatio, getRatio, keyPrefix, keyMin, limiter,
+						timeoutSeconds, measureSetup, verbose, quiet)
+				case "momento":
+					go runMomentoWorkerWithConnectionCreation(workerCtx, &wg, i, cacheType, cmd, totalKeys, zipfExp,
+						generator, stats, workerCount, setRatio, getRatio, keyPrefix, keyMin, limiter,
+						timeoutSeconds, measureSetup, verbose, quiet)
+				default:
+					log.Fatalf("Invalid cache type: %s", cacheType)
+				}
 			}
-
 			fmt.Printf("  Successfully initiated %d new workers\n", newWorkers)
 		}
 	}
@@ -2060,7 +2080,7 @@ func runConnectionSetupBenchmark(cmd *cobra.Command, args []string) {
 
 			// Measure connection setup time (create + ping)
 			connStart := time.Now()
-			client, err := createCacheClientForRun(cacheType, cmd)
+			client, err := createCacheClientForRun(ctx, cacheType, cmd)
 			if err != nil {
 				atomic.AddInt64(&failureCount, 1)
 				if verbose {
@@ -2248,7 +2268,7 @@ func init() {
 	runCmd.Flags().String("momento-cache-name", "test-cache", "Momento cache name")
 	runCmd.Flags().Bool("momento-create-cache", true, "Automatically create Momento cache if it doesn't exist")
 	runCmd.Flags().Uint32("momento-client-conn-count", 1, "Set number of TCP conn each momento client creates")
-	runCmd.Flags().Int("momento-client-worker-batch-size", 1, "Set number of requests each perf worker will make")
+	runCmd.Flags().Int("momento-client-worker-count", 1, "Set number of workload generators for each momento client")
 
 	// Workload-specific Options
 	runCmd.Flags().Float64("key-zipf-exp", 1.0, "Zipf distribution exponent (0 < exp <= 5), higher = more concentration")
