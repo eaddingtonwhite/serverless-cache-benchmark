@@ -7,6 +7,8 @@ import (
 	"github.com/HdrHistogram/hdrhistogram-go"
 )
 
+const METRIC_WINDOW_SIZE_SECONDS = 5
+
 // LatencyEvent represents a latency measurement event
 type LatencyEvent struct {
 	LatencyMicros int64
@@ -27,9 +29,9 @@ type PerformanceStats struct {
 	done           chan struct{}
 
 	// Per-second histograms (only accessed by stats goroutine)
-	currentSecond    int64
-	currentHistogram *hdrhistogram.Histogram
-	secondHistograms map[int64]*hdrhistogram.Histogram
+	currentWindowStartSecond int64
+	currentHistogram         *hdrhistogram.Histogram
+	windowedHistograms       map[int64]*hdrhistogram.Histogram
 }
 
 func NewPerformanceStats() *PerformanceStats {
@@ -37,13 +39,13 @@ func NewPerformanceStats() *PerformanceStats {
 	hist := hdrhistogram.New(1, 60*1000*1000, 3)
 
 	ps := &PerformanceStats{
-		Histogram:        hist,
-		StartTime:        time.Now(),
-		secondHistograms: make(map[int64]*hdrhistogram.Histogram),
-		currentHistogram: hdrhistogram.New(1, 60*1000*1000, 3),
-		latencyChannel:   make(chan LatencyEvent, 1000000), // Buffered channel to prevent blocking
-		errorChannel:     make(chan struct{}, 100),         // Buffered for errors
-		done:             make(chan struct{}),
+		Histogram:          hist,
+		StartTime:          time.Now(),
+		windowedHistograms: make(map[int64]*hdrhistogram.Histogram),
+		currentHistogram:   hdrhistogram.New(1, 60*1000*1000, 3),
+		latencyChannel:     make(chan LatencyEvent, 1000000), // Buffered channel to prevent blocking
+		errorChannel:       make(chan struct{}, 100),         // Buffered for errors
+		done:               make(chan struct{}),
 	}
 
 	// Start the stats collection goroutine
@@ -57,17 +59,17 @@ func (ps *PerformanceStats) statsCollector() {
 	for {
 		select {
 		case event := <-ps.latencyChannel:
-			second := event.Timestamp.Unix()
+			currentSecond := event.Timestamp.Unix()
 
 			// Record in overall histogram (no lock needed, single goroutine)
 			ps.Histogram.RecordValue(event.LatencyMicros)
 
-			// Record in per-second histogram (no lock needed, single goroutine)
-			if second != ps.currentSecond {
+			// Record in per-currentSecond histogram (no lock needed, single goroutine)
+			if currentSecond-ps.currentWindowStartSecond >= METRIC_WINDOW_SIZE_SECONDS {
 				if ps.currentHistogram.TotalCount() > 0 {
-					ps.secondHistograms[ps.currentSecond] = ps.currentHistogram
+					ps.windowedHistograms[ps.currentWindowStartSecond] = ps.currentHistogram
 				}
-				ps.currentSecond = second
+				ps.currentWindowStartSecond = currentSecond
 				ps.currentHistogram = hdrhistogram.New(1, 60*1000*1000, 3)
 			}
 			ps.currentHistogram.RecordValue(event.LatencyMicros)
@@ -137,10 +139,10 @@ func (ps *PerformanceStats) GetStats() (int64, int64, int64, float64, int64, int
 	return total, success, failed, qps, p50, p95, p99
 }
 
-// GetCurrentSecondStats returns stats for the previous second. We want to return previous second vs current since
-// current second window can still be filling up and have stale/incomplete data since were not using locks.
-func (ps *PerformanceStats) GetCurrentSecondStats() (int64, int64, int64, int64, int64) {
-	histToUse := ps.secondHistograms[ps.currentSecond-1]
+// GetPreviousWindowStats returns stats for the previous metrics window. We want to return previous window vs current since
+// current metric window can still be filling up and have stale/incomplete data since were not using locks on these.
+func (ps *PerformanceStats) GetPreviousWindowStats() (int64, int64, int64, int64, int64) {
+	histToUse := ps.windowedHistograms[ps.currentWindowStartSecond-METRIC_WINDOW_SIZE_SECONDS]
 	if histToUse == nil || histToUse.TotalCount() == 0 {
 		return 0, 0, 0, 0, 0
 	}
