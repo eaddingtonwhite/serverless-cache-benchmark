@@ -7,7 +7,7 @@ import (
 	"github.com/HdrHistogram/hdrhistogram-go"
 )
 
-const METRIC_WINDOW_SIZE_SECONDS = 5
+const MetricWindowSizeSeconds = 5
 
 // LatencyEvent represents a latency measurement event
 type LatencyEvent struct {
@@ -64,8 +64,8 @@ func (ps *PerformanceStats) statsCollector() {
 			// Record in overall histogram (no lock needed, single goroutine)
 			ps.Histogram.RecordValue(event.LatencyMicros)
 
-			// Record in per-currentSecond histogram (no lock needed, single goroutine)
-			if currentSecond-ps.currentWindowStartSecond >= METRIC_WINDOW_SIZE_SECONDS {
+			// Record in current monitoring window histogram (no lock needed, single goroutine)
+			if currentSecond-ps.currentWindowStartSecond >= MetricWindowSizeSeconds {
 				if ps.currentHistogram.TotalCount() > 0 {
 					ps.windowedHistograms[ps.currentWindowStartSecond] = ps.currentHistogram
 				}
@@ -142,7 +142,7 @@ func (ps *PerformanceStats) GetStats() (int64, int64, int64, float64, int64, int
 // GetPreviousWindowStats returns stats for the previous metrics window. We want to return previous window vs current since
 // current metric window can still be filling up and have stale/incomplete data since were not using locks on these.
 func (ps *PerformanceStats) GetPreviousWindowStats() (int64, int64, int64, int64, int64) {
-	histToUse := ps.windowedHistograms[ps.currentWindowStartSecond-METRIC_WINDOW_SIZE_SECONDS]
+	histToUse := ps.windowedHistograms[ps.currentWindowStartSecond-MetricWindowSizeSeconds]
 	if histToUse == nil || histToUse.TotalCount() == 0 {
 		return 0, 0, 0, 0, 0
 	}

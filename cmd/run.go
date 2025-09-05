@@ -1565,7 +1565,7 @@ func manageTrafficPattern(ctx context.Context, configs []TrafficConfig, cacheTyp
 
 // reportProgress reports workload progress with a progress bar
 func reportProgress(ctx context.Context, stats *WorkloadStats, verbose bool) {
-	ticker := time.NewTicker(METRIC_WINDOW_SIZE_SECONDS * time.Second)
+	ticker := time.NewTicker(MetricWindowSizeSeconds * time.Second)
 	defer ticker.Stop()
 
 	startTime := time.Now()
@@ -1598,8 +1598,8 @@ func reportProgress(ctx context.Context, stats *WorkloadStats, verbose bool) {
 				setCurrentOps, setP50, setP95, setP99, setMax := stats.SetStats.GetPreviousWindowStats()
 
 				// Calculate current metric window AVG QPS
-				currentWindowGetOps := float64(getCurrentOps / METRIC_WINDOW_SIZE_SECONDS)
-				currentWindowSetOps := float64(setCurrentOps / METRIC_WINDOW_SIZE_SECONDS)
+				currentWindowGetOps := float64(getCurrentOps / MetricWindowSizeSeconds)
+				currentWindowSetOps := float64(setCurrentOps / MetricWindowSizeSeconds)
 				currentTotalQPS := currentWindowGetOps + currentWindowSetOps
 
 				// Get system resource usage
@@ -1749,7 +1749,7 @@ func getCurrentTargetInfo(stats *WorkloadStats) (int, int) {
 
 // reportStaticProgress reports progress for static workload with progress bar
 func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime int, clientCount int, verbose bool) {
-	ticker := time.NewTicker(METRIC_WINDOW_SIZE_SECONDS * time.Second)
+	ticker := time.NewTicker(MetricWindowSizeSeconds * time.Second)
 	defer ticker.Stop()
 
 	startTime := time.Now()
@@ -1776,8 +1776,8 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 				setCurrentOps, setP50, setP95, setP99, setMax := stats.SetStats.GetPreviousWindowStats()
 
 				// Calculate current metric window AVG QPS
-				currentWindowGetOps := float64(getCurrentOps / METRIC_WINDOW_SIZE_SECONDS)
-				currentWindowSetOps := float64(setCurrentOps / METRIC_WINDOW_SIZE_SECONDS)
+				currentWindowGetOps := float64(getCurrentOps / MetricWindowSizeSeconds)
+				currentWindowSetOps := float64(setCurrentOps / MetricWindowSizeSeconds)
 				currentTotalQPS := currentWindowGetOps + currentWindowSetOps
 
 				// Create progress bar for static workload
