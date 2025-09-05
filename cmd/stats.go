@@ -7,6 +7,8 @@ import (
 	"github.com/HdrHistogram/hdrhistogram-go"
 )
 
+const MetricWindowTimeSeconds = 15
+
 // LatencyEvent represents a latency measurement event
 type LatencyEvent struct {
 	LatencyMicros int64
@@ -63,7 +65,7 @@ func (ps *PerformanceStats) statsCollector() {
 			ps.Histogram.RecordValue(event.LatencyMicros)
 
 			// Record in per-second histogram (no lock needed, single goroutine)
-			if second != ps.currentSecond {
+			if ps.currentSecond-second >= MetricWindowTimeSeconds {
 				if ps.currentHistogram.TotalCount() > 0 {
 					ps.secondHistograms[ps.currentSecond] = ps.currentHistogram
 				}
@@ -137,15 +139,15 @@ func (ps *PerformanceStats) GetStats() (int64, int64, int64, float64, int64, int
 	return total, success, failed, qps, p50, p95, p99
 }
 
-// GetCurrentSecondStats returns stats for the current second
+// GetCurrentWindowStats returns stats for the current second
 // Note: This may return slightly stale data since we're not using locks,
 // but this is acceptable for monitoring purposes and eliminates contention
-func (ps *PerformanceStats) GetCurrentSecondStats() (int64, int64, int64, int64, int64) {
+func (ps *PerformanceStats) GetCurrentWindowStats() (int64, int64, int64, int64, int64) {
 	if ps.currentHistogram == nil || ps.currentHistogram.TotalCount() == 0 {
 		return 0, 0, 0, 0, 0
 	}
 
-	return ps.currentHistogram.TotalCount(),
+	return ps.currentHistogram.TotalCount() / MetricWindowTimeSeconds,
 		ps.currentHistogram.ValueAtQuantile(50),
 		ps.currentHistogram.ValueAtQuantile(95),
 		ps.currentHistogram.ValueAtQuantile(99),
