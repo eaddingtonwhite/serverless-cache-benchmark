@@ -1299,14 +1299,6 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 
 	// Producer loop - generate requests continuously
 	for {
-		select {
-		case <-ctx.Done():
-			close(requestChan)
-			consumerWG.Wait()
-			return
-		default:
-		}
-
 		// Apply rate limiting if configured
 		if limiter != nil {
 			err := limiter.Wait(ctx)
