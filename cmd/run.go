@@ -315,44 +315,6 @@ func (ws *WorkloadStats) RecordOperationInBlock(isSet bool, latencyMicros int64,
 	}
 }
 
-// recordBlockStatOptimized reduces lock contention with backoff retry
-func recordBlockStatOptimized(stats *WorkloadStats, isSet bool, latencyMicros int64, isError bool) {
-	// Try to acquire read lock with brief backoff
-	for attempts := 0; attempts < 3; attempts++ {
-		if stats.BlockMutex.TryRLock() {
-			defer stats.BlockMutex.RUnlock()
-			break
-		}
-		// Brief backoff - only for first 2 attempts
-		if attempts < 2 {
-			time.Sleep(time.Microsecond * 10) // 10 microsecond backoff
-		} else {
-			// After 3 attempts, skip to avoid blocking (rare case)
-			return
-		}
-	}
-
-	if stats.CurrentBlock == nil {
-		return
-	}
-
-	if isSet {
-		if isError {
-			atomic.AddInt64(&stats.CurrentBlock.SetErrors, 1)
-		} else {
-			atomic.AddInt64(&stats.CurrentBlock.ActualSetOps, 1)
-			stats.CurrentBlock.SetStats.RecordLatency(latencyMicros)
-		}
-	} else {
-		if isError {
-			atomic.AddInt64(&stats.CurrentBlock.GetErrors, 1)
-		} else {
-			atomic.AddInt64(&stats.CurrentBlock.ActualGetOps, 1)
-			stats.CurrentBlock.GetStats.RecordLatency(latencyMicros)
-		}
-	}
-}
-
 // runCmd represents the run command
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -1297,8 +1259,7 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 	opCount *int64, zipfGen *ZipfGenerator, verbose bool, limiter *rate.Limiter) {
 
 	// Create channels for producer-consumer communication
-	requestChan := make(chan requestInfo, numConsumers*2)   // Buffer to prevent blocking
-	resultChan := make(chan workloadResult, numConsumers*2) // buffer to prevent blocking
+	requestChan := make(chan requestInfo, numConsumers*2) // Buffer to prevent blocking
 
 	// Start consumer goroutines
 	var consumerWG sync.WaitGroup
@@ -1307,23 +1268,34 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 		go func(consumerID int) {
 			defer consumerWG.Done()
 			for request := range requestChan {
-				result := processRequest(ctx, request, client, generator, timeoutSeconds, verbose)
 				select {
-				case resultChan <- result:
 				case <-ctx.Done():
 					return
+				default:
+					result := processRequest(ctx, request, client, generator, timeoutSeconds, verbose)
+					if result.isSet {
+						if result.isError {
+							atomic.AddInt64(&stats.SetErrors, 1)
+							stats.RecordOperationInBlock(true, 0, true)
+						} else {
+							atomic.AddInt64(&stats.SetOps, 1)
+							stats.SetStats.RecordLatency(result.latencyMicros)
+							stats.RecordOperationInBlock(true, result.latencyMicros, false)
+						}
+					} else {
+						if result.isError {
+							atomic.AddInt64(&stats.GetErrors, 1)
+							stats.RecordOperationInBlock(false, 0, true)
+						} else {
+							atomic.AddInt64(&stats.GetOps, 1)
+							stats.GetStats.RecordLatency(result.latencyMicros)
+							stats.RecordOperationInBlock(false, result.latencyMicros, false)
+						}
+					}
 				}
 			}
 		}(i)
 	}
-
-	// Start result processor goroutine
-	var resultWG sync.WaitGroup
-	resultWG.Add(1)
-	go func() {
-		defer resultWG.Done()
-		processResults(ctx, resultChan, stats, verbose)
-	}()
 
 	// Producer loop - generate requests continuously
 	for {
@@ -1331,8 +1303,6 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 		case <-ctx.Done():
 			close(requestChan)
 			consumerWG.Wait()
-			resultWG.Wait()
-			close(resultChan)
 			return
 		default:
 		}
@@ -1343,8 +1313,6 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 			if err != nil {
 				close(requestChan)
 				consumerWG.Wait()
-				resultWG.Wait()
-				close(resultChan)
 				return
 			}
 		}
@@ -1367,8 +1335,6 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 		case <-ctx.Done():
 			close(requestChan)
 			consumerWG.Wait()
-			resultWG.Wait()
-			close(resultChan)
 			return
 		}
 	}
@@ -1425,42 +1391,6 @@ func processRequest(ctx context.Context, request requestInfo, client CacheClient
 			return workloadResult{isSet: false, isError: true, latencyMicros: 0}
 		} else {
 			return workloadResult{isSet: false, isError: false, latencyMicros: latency.Microseconds()}
-		}
-	}
-}
-
-// processResults processes operation results and updates statistics
-func processResults(ctx context.Context, resultChan <-chan workloadResult, stats *WorkloadStats, verbose bool) {
-	for {
-		select {
-		case result, ok := <-resultChan:
-			if !ok {
-				return // Channel closed
-			}
-
-			// Update statistics without lock contention
-			if result.isSet {
-				if result.isError {
-					atomic.AddInt64(&stats.SetErrors, 1)
-					recordBlockStatOptimized(stats, true, 0, true)
-				} else {
-					atomic.AddInt64(&stats.SetOps, 1)
-					stats.SetStats.RecordLatency(result.latencyMicros)
-					recordBlockStatOptimized(stats, true, result.latencyMicros, false)
-				}
-			} else {
-				if result.isError {
-					atomic.AddInt64(&stats.GetErrors, 1)
-					recordBlockStatOptimized(stats, false, 0, true)
-				} else {
-					atomic.AddInt64(&stats.GetOps, 1)
-					stats.GetStats.RecordLatency(result.latencyMicros)
-					recordBlockStatOptimized(stats, false, result.latencyMicros, false)
-				}
-			}
-
-		case <-ctx.Done():
-			return
 		}
 	}
 }
