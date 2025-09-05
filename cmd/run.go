@@ -1321,7 +1321,7 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 			key:      key,
 		}
 
-		// Send request to consumers (non-blocking)
+		// Send request to consumers (blocking if full)
 		select {
 		case requestChan <- request:
 		case <-ctx.Done():
