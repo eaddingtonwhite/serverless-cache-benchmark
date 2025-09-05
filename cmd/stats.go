@@ -65,7 +65,7 @@ func (ps *PerformanceStats) statsCollector() {
 			ps.Histogram.RecordValue(event.LatencyMicros)
 
 			// Record in per-second histogram (no lock needed, single goroutine)
-			if ps.currentSecond-second >= MetricWindowTimeSeconds {
+			if second-ps.currentSecond >= MetricWindowTimeSeconds {
 				if ps.currentHistogram.TotalCount() > 0 {
 					ps.secondHistograms[ps.currentSecond] = ps.currentHistogram
 				}
