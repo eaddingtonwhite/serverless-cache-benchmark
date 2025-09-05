@@ -1394,62 +1394,6 @@ type workloadResult struct {
 	latencyMicros int64
 }
 
-// processSingleRequest processes a single request and returns the result
-func processSingleRequest(ctx context.Context, workerID int, client CacheClient,
-	totalKeys int, zipfExp float64, generator *DataGenerator,
-	setRatio, getRatio int, keyPrefix string, keyMin int, timeoutSeconds int, opCount *int64, zipfGen *ZipfGenerator, verbose bool) workloadResult {
-
-	// Determine operation type based on ratio
-	*opCount++
-	isSet := (*opCount % int64(setRatio+getRatio)) < int64(setRatio)
-
-	// Generate key using Zipf distribution
-	keyOffset := zipfGen.Next()
-	key := fmt.Sprintf("%s%d", keyPrefix, keyMin+int(keyOffset))
-
-	// Create operation timeout context
-	opCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
-	defer cancel()
-
-	if isSet {
-		// Perform SET operation
-		data, err := generator.GenerateData()
-		if err != nil {
-			return workloadResult{isSet: true, isError: true, latencyMicros: 0}
-		}
-
-		// Get expiration from generator (uses DefaultTTL if set)
-		expiration := generator.GetExpiration()
-
-		start := time.Now()
-		err = client.Set(opCtx, key, data, expiration)
-		latency := time.Since(start)
-
-		if err != nil {
-			if verbose {
-				log.Printf("Worker %d: Set operation failed for key %s: %v", workerID, key, err)
-			}
-			return workloadResult{isSet: true, isError: true, latencyMicros: 0}
-		} else {
-			return workloadResult{isSet: true, isError: false, latencyMicros: latency.Microseconds()}
-		}
-	} else {
-		// Perform GET operation
-		start := time.Now()
-		_, err := client.Get(opCtx, key)
-		latency := time.Since(start)
-
-		if err != nil {
-			if verbose {
-				log.Printf("Worker %d: Get operation failed for key %s: %v", workerID, key, err)
-			}
-			return workloadResult{isSet: false, isError: true, latencyMicros: 0}
-		} else {
-			return workloadResult{isSet: false, isError: false, latencyMicros: latency.Microseconds()}
-		}
-	}
-}
-
 // runWorkerWithConnectionCreation creates its own connection and then runs the worker
 func runWorkerWithConnectionCreation(ctx context.Context, wg *sync.WaitGroup, workerID int,
 	cacheType string, cmd *cobra.Command, totalKeys int, zipfExp float64,
