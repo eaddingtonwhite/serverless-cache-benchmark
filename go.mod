@@ -1,6 +1,6 @@
 module github.com/redis-performance/serverless-cache-benchmark
 
-go 1.24.6
+go 1.24.5
 
 require (
 	github.com/HdrHistogram/hdrhistogram-go v1.1.2
