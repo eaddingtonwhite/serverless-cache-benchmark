@@ -206,7 +206,7 @@ func NewCloudWatchConfig(enabled bool, region, namespace string) (*CloudWatchCon
 }
 
 // emitCloudWatchMetrics emits metrics to CloudWatch
-func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float64, getP99, setP99 int64) {
+func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float64, getP99, setP99 int64, tcpConnCount int) {
 	if !cw.Enabled || cw.Client == nil {
 		return
 	}
@@ -286,6 +286,23 @@ func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float
 			MetricName: aws.String("SetLatencyP99"),
 			Value:      aws.Float64(float64(setP99)),
 			Unit:       types.StandardUnitMicroseconds,
+			Dimensions: []types.Dimension{
+				{
+					Name:  aws.String("Host"),
+					Value: aws.String(cw.Hostname),
+				},
+				{
+					Name:  aws.String("LoadTest"),
+					Value: aws.String("MomentoPerf"),
+				},
+			},
+			Timestamp:         &now,
+			StorageResolution: aws.Int32(1),
+		},
+		{
+			MetricName: aws.String("TcpConnections"),
+			Value:      aws.Float64(float64(tcpConnCount)),
+			Unit:       types.StandardUnitCount,
 			Dimensions: []types.Dimension{
 				{
 					Name:  aws.String("Host"),
@@ -2031,7 +2048,7 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 				fmt.Print(progressLine)
 
 				// Emit CloudWatch metrics
-				cloudwatchConfig.emitCloudWatchMetrics(currentWindowGetOps, currentWindowSetOps, currentTotalQPS, getP99, setP99)
+				cloudwatchConfig.emitCloudWatchMetrics(currentWindowGetOps, currentWindowSetOps, currentTotalQPS, getP99, setP99, sysStats.OutboundTCPConns)
 			}
 		}
 	}
