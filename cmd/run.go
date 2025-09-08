@@ -223,6 +223,10 @@ func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float
 					Name:  aws.String("Host"),
 					Value: aws.String(cw.Hostname),
 				},
+				{
+					Name:  aws.String("LoadTest"),
+					Value: aws.String("MomentoPerf"),
+				},
 			},
 			Timestamp:         &now,
 			StorageResolution: aws.Int32(1),
@@ -235,6 +239,10 @@ func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float
 				{
 					Name:  aws.String("Host"),
 					Value: aws.String(cw.Hostname),
+				},
+				{
+					Name:  aws.String("LoadTest"),
+					Value: aws.String("MomentoPerf"),
 				},
 			},
 			Timestamp:         &now,
@@ -249,6 +257,10 @@ func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float
 					Name:  aws.String("Host"),
 					Value: aws.String(cw.Hostname),
 				},
+				{
+					Name:  aws.String("LoadTest"),
+					Value: aws.String("MomentoPerf"),
+				},
 			},
 			Timestamp:         &now,
 			StorageResolution: aws.Int32(1),
@@ -262,6 +274,10 @@ func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float
 					Name:  aws.String("Host"),
 					Value: aws.String(cw.Hostname),
 				},
+				{
+					Name:  aws.String("LoadTest"),
+					Value: aws.String("MomentoPerf"),
+				},
 			},
 			Timestamp:         &now,
 			StorageResolution: aws.Int32(1),
@@ -274,6 +290,10 @@ func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float
 				{
 					Name:  aws.String("Host"),
 					Value: aws.String(cw.Hostname),
+				},
+				{
+					Name:  aws.String("LoadTest"),
+					Value: aws.String("MomentoPerf"),
 				},
 			},
 			Timestamp:         &now,
@@ -1427,6 +1447,7 @@ func runProducerConsumer(ctx context.Context, workerID int, client CacheClient,
 					return
 				default:
 					result := processRequest(ctx, request, client, generator, timeoutSeconds, verbose)
+					// Process and record result
 					if result.isSet {
 						if result.isError {
 							atomic.AddInt64(&stats.SetErrors, 1)
@@ -1925,7 +1946,7 @@ func reportStaticProgress(ctx context.Context, stats *WorkloadStats, testTime in
 			elapsed := time.Since(startTime)
 
 			if totalOps > 0 {
-				// Get current second stats for progress bar display
+				// Get current monitoring window stats
 				getCurrentOps, getP50, getP95, getP99, getMax := stats.GetStats.GetPreviousWindowStats()
 				setCurrentOps, setP50, setP95, setP99, setMax := stats.SetStats.GetPreviousWindowStats()
 
