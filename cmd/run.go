@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
@@ -211,66 +212,72 @@ func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float
 	}
 
 	// Create metric data
+	now := time.Now()
 	metricData := []types.MetricDatum{
 		{
-			MetricName: stringPtr("GetOpsPerSecond"),
-			Value:      float64Ptr(getOps),
+			MetricName: aws.String("GetOpsPerSecond"),
+			Value:      aws.Float64(getOps),
 			Unit:       types.StandardUnitCountSecond,
 			Dimensions: []types.Dimension{
 				{
-					Name:  stringPtr("Host"),
-					Value: stringPtr(cw.Hostname),
+					Name:  aws.String("Host"),
+					Value: aws.String(cw.Hostname),
 				},
 			},
-			Timestamp: timePtr(time.Now()),
+			Timestamp:         &now,
+			StorageResolution: aws.Int32(1),
 		},
 		{
-			MetricName: stringPtr("SetOpsPerSecond"),
-			Value:      float64Ptr(setOps),
+			MetricName: aws.String("SetOpsPerSecond"),
+			Value:      aws.Float64(setOps),
 			Unit:       types.StandardUnitCountSecond,
 			Dimensions: []types.Dimension{
 				{
-					Name:  stringPtr("Host"),
-					Value: stringPtr(cw.Hostname),
+					Name:  aws.String("Host"),
+					Value: aws.String(cw.Hostname),
 				},
 			},
-			Timestamp: timePtr(time.Now()),
+			Timestamp:         &now,
+			StorageResolution: aws.Int32(1),
 		},
 		{
-			MetricName: stringPtr("TotalQPS"),
-			Value:      float64Ptr(totalQPS),
+			MetricName: aws.String("TotalQPS"),
+			Value:      aws.Float64(totalQPS),
 			Unit:       types.StandardUnitCountSecond,
 			Dimensions: []types.Dimension{
 				{
-					Name:  stringPtr("Host"),
-					Value: stringPtr(cw.Hostname),
+					Name:  aws.String("Host"),
+					Value: aws.String(cw.Hostname),
 				},
 			},
-			Timestamp: timePtr(time.Now()),
+			Timestamp:         &now,
+			StorageResolution: aws.Int32(1),
 		},
 		{
-			MetricName: stringPtr("GetLatencyP99"),
-			Value:      float64Ptr(float64(getP99)),
+			MetricName: aws.String("GetLatencyP99"),
+			Value:      aws.Float64(float64(getP99)),
 			Unit:       types.StandardUnitMicroseconds,
 			Dimensions: []types.Dimension{
 				{
-					Name:  stringPtr("Host"),
-					Value: stringPtr(cw.Hostname),
+					Name:  aws.String("Host"),
+					Value: aws.String(cw.Hostname),
 				},
 			},
-			Timestamp: timePtr(time.Now()),
+			Timestamp:         &now,
+			StorageResolution: aws.Int32(1),
 		},
 		{
-			MetricName: stringPtr("SetLatencyP99"),
-			Value:      float64Ptr(float64(setP99)),
+			MetricName: aws.String("SetLatencyP99"),
+			Value:      aws.Float64(float64(setP99)),
 			Unit:       types.StandardUnitMicroseconds,
 			Dimensions: []types.Dimension{
 				{
-					Name:  stringPtr("Host"),
-					Value: stringPtr(cw.Hostname),
+					Name:  aws.String("Host"),
+					Value: aws.String(cw.Hostname),
 				},
 			},
-			Timestamp: timePtr(time.Now()),
+			Timestamp:         &now,
+			StorageResolution: aws.Int32(1),
 		},
 	}
 
@@ -280,7 +287,7 @@ func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float
 		defer cancel()
 
 		_, err := cw.Client.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
-			Namespace:  stringPtr(cw.Namespace),
+			Namespace:  aws.String(cw.Namespace),
 			MetricData: metricData,
 		})
 
@@ -288,19 +295,6 @@ func (cw *CloudWatchConfig) emitCloudWatchMetrics(getOps, setOps, totalQPS float
 			log.Printf("Warning: Failed to emit CloudWatch metrics: %v", err)
 		}
 	}()
-}
-
-// Helper functions for CloudWatch types
-func stringPtr(s string) *string {
-	return &s
-}
-
-func float64Ptr(f float64) *float64 {
-	return &f
-}
-
-func timePtr(t time.Time) *time.Time {
-	return &t
 }
 
 // NewCSVLogger creates a new CSV logger with the specified filename
